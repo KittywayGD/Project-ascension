@@ -32,6 +32,11 @@ pub enum Aim {
         id: BuildingId,
         distance: f32,
     },
+    /// Module fixé sur le toit d'une machine.
+    Module {
+        id: BuildingId,
+        distance: f32,
+    },
     Ground {
         point: Vec3,
         distance: f32,
@@ -123,6 +128,17 @@ pub fn update_target(
     }
     if let Some((id, distance)) = buildings.0.raycast(origin, direction, nearest) {
         aim = Aim::Building { id, distance };
+        nearest = distance;
+    }
+    // Les modules sont posés sur les toits, à l'intérieur de la boîte englobante du
+    // bâtiment : un module touché juste derrière l'entrée dans cette boîte est bien visible.
+    let building_hit = nearest;
+    if let Some((id, distance)) = buildings
+        .0
+        .raycast_modules(&sim.world, origin, direction, REACH_M)
+        .filter(|(_, t)| *t <= building_hit + 1.0)
+    {
+        aim = Aim::Module { id, distance };
         nearest = distance;
     }
     if let Some((id, distance)) = buildings

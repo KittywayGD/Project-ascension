@@ -11,6 +11,7 @@ use bevy::math::{Quat, Vec3};
 
 use crate::collision::{Obstacle, ray_aabb};
 use crate::simulation::energy::POLE_RANGE_M;
+use crate::simulation::modules::{ModuleError, ModuleKind};
 use crate::simulation::sim_world::{BuildingId, BuildingKind, ConveyorError, SimWorld};
 use crate::world::deposits::{DepositField, DepositId};
 use crate::world::generation::HeightField;
@@ -59,6 +60,11 @@ pub fn dims(kind: BuildingKind) -> Dims {
             height: 4.2,
             cable_height: 4.0,
         },
+        BuildingKind::Hub => Dims {
+            half: 1.5,
+            height: 3.4,
+            cable_height: 2.0,
+        },
     }
 }
 
@@ -66,17 +72,33 @@ pub fn dims(kind: BuildingKind) -> Dims {
 pub fn output_port(kind: BuildingKind) -> Option<Vec3> {
     match kind {
         BuildingKind::Extractor => Some(Vec3::new(0.0, 0.6, -1.5)),
-        BuildingKind::Furnace => Some(Vec3::new(1.5, 0.7, 0.0)),
+        BuildingKind::Furnace => Some(Vec3::new(0.0, 0.7, -1.5)),
         BuildingKind::Storage => Some(Vec3::new(0.0, 0.5, -1.0)),
-        BuildingKind::Generator | BuildingKind::Pole => None,
+        BuildingKind::Generator | BuildingKind::Pole | BuildingKind::Hub => None,
     }
 }
+
+/// Emplacements de module : points du toit (repère local) où un module se pose.
+/// Leur nombre est celui de `BuildingKind::module_slots`.
+pub fn module_sockets(kind: BuildingKind) -> &'static [Vec3] {
+    const EXTRACTOR: [Vec3; 2] = [Vec3::new(-0.75, 1.4, 0.6), Vec3::new(0.75, 1.4, 0.6)];
+    const FURNACE: [Vec3; 2] = [Vec3::new(-0.55, 2.0, 0.55), Vec3::new(0.5, 2.0, -0.5)];
+    match kind {
+        BuildingKind::Extractor => &EXTRACTOR,
+        BuildingKind::Furnace => &FURNACE,
+        _ => &[],
+    }
+}
+
+/// Demi-dimensions d'un module posé (boîte au-dessus de son emplacement).
+pub const MODULE_HALF: Vec3 = Vec3::new(0.35, 0.225, 0.35);
 
 /// Position locale de l'entrée, à rotation 0.
 pub fn input_port(kind: BuildingKind) -> Option<Vec3> {
     match kind {
         BuildingKind::Furnace => Some(Vec3::new(0.0, 0.7, 1.5)),
         BuildingKind::Storage => Some(Vec3::new(0.0, 0.5, 1.0)),
+        BuildingKind::Hub => Some(Vec3::new(0.0, 0.6, 1.5)),
         _ => None,
     }
 }
@@ -126,6 +148,13 @@ impl PlacedBuilding {
         Vec3::new(self.x, self.base_y, self.z) + rotation * local
     }
 
+    /// Base (sur le toit) de l'emplacement de module `socket`, dans le monde.
+    pub fn socket_world(&self, socket: u8) -> Option<Vec3> {
+        module_sockets(self.kind)
+            .get(usize::from(socket))
+            .map(|p| self.to_world(*p))
+    }
+
     pub fn output_world(&self) -> Option<Vec3> {
         output_port(self.kind).map(|p| self.to_world(p))
     }
@@ -147,7 +176,7 @@ impl PlacedBuilding {
 }
 
 /// Tous les bâtiments posés, indexés par leur identifiant de simulation.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PlacedBuildings {
     buildings: BTreeMap<BuildingId, PlacedBuilding>,
 }
@@ -195,6 +224,30 @@ impl PlacedBuildings {
                 let (t, gap) = ray_segment(origin, direction, a, b);
                 (gap <= 0.4 && t <= max_distance).then_some((id, t))
             })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// Boîte englobante d'un module posé.
+    pub fn module_bounds(&self, host: BuildingId, socket: u8) -> Option<(Vec3, Vec3)> {
+        let base = self.get(host)?.socket_world(socket)?;
+        let center = base + Vec3::Y * MODULE_HALF.y;
+        Some((center - MODULE_HALF, center + MODULE_HALF))
+    }
+
+    /// Premier module touché par un rayon.
+    pub fn raycast_modules(
+        &self,
+        sim: &SimWorld,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: f32,
+    ) -> Option<(BuildingId, f32)> {
+        sim.modules()
+            .filter_map(|(id, m)| {
+                let (min, max) = self.module_bounds(m.host, m.socket)?;
+                ray_aabb(origin, direction, min, max).map(|t| (id, t))
+            })
+            .filter(|&(_, t)| t <= max_distance)
             .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
@@ -275,6 +328,59 @@ fn ray_segment(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3) -> (f32, f32) {
     let t = ((ab * s - aw) / aa).max(0.0);
     let gap = (origin + direction * t).distance(a + segment * s);
     (t, gap)
+}
+
+/// Aperçu d'un module en cours de pose sur une machine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModulePreview {
+    pub host: BuildingId,
+    pub socket: u8,
+    /// Base du module (sur le toit), dans le monde.
+    pub position: Vec3,
+    pub result: Result<(), ModuleError>,
+}
+
+/// Évalue la pose d'un module sur la machine `host`, visée au point `hit` :
+/// l'emplacement libre le plus proche du point visé est choisi.
+pub fn preview_module(
+    kind: ModuleKind,
+    host: BuildingId,
+    hit: Vec3,
+    sim: &SimWorld,
+    placed: &PlacedBuildings,
+) -> Option<ModulePreview> {
+    let building = placed.get(host)?;
+    let sockets = module_sockets(building.kind);
+    if sockets.is_empty() {
+        return Some(ModulePreview {
+            host,
+            socket: 0,
+            position: hit,
+            result: Err(ModuleError::Incompatible),
+        });
+    }
+    let distance = |s: u8| {
+        building
+            .socket_world(s)
+            .map_or(f32::MAX, |p| p.distance(hit))
+    };
+    let free: Vec<u8> = (0..sockets.len() as u8)
+        .filter(|&s| sim.check_module(host, s, kind).is_ok())
+        .collect();
+    let (socket, result) = match free
+        .iter()
+        .copied()
+        .min_by(|a, b| distance(*a).total_cmp(&distance(*b)))
+    {
+        Some(socket) => (socket, Ok(())),
+        None => (0, Err(ModuleError::NoSuchSocket)),
+    };
+    Some(ModulePreview {
+        host,
+        socket,
+        position: building.socket_world(socket).unwrap_or(hit),
+        result,
+    })
 }
 
 /// Problème empêchant la pose d'un convoyeur.
@@ -616,14 +722,62 @@ mod tests {
             foundation_bottom: 1.0,
             rotation: 0,
         };
-        assert_eq!(furnace.output_world(), Some(Vec3::new(11.5, 2.7, 0.0)));
-        furnace.rotation = 2; // demi-tour : la sortie passe à l'ouest
+        assert_eq!(furnace.output_world(), Some(Vec3::new(10.0, 2.7, -1.5)));
+        furnace.rotation = 2; // demi-tour : la sortie passe au sud
         let out = furnace.output_world().unwrap();
-        assert!(out.abs_diff_eq(Vec3::new(8.5, 2.7, 0.0), 1e-5), "{out}");
+        assert!(out.abs_diff_eq(Vec3::new(10.0, 2.7, 1.5), 1e-5), "{out}");
         assert_eq!(
             BuildingKind::Generator.has_output(),
             output_port(BuildingKind::Generator).is_some()
         );
+    }
+
+    /// Un bâtiment qui a une entrée et une sortie les porte sur des faces opposées.
+    #[test]
+    fn input_and_output_are_on_opposite_faces() {
+        for kind in BuildingKind::ALL {
+            if let (Some(i), Some(o)) = (input_port(kind), output_port(kind)) {
+                let (i, o) = (i.with_y(0.0), o.with_y(0.0));
+                assert!(i.normalize().dot(o.normalize()) < -0.99, "{kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_production_machine_has_as_many_sockets_as_slots() {
+        for kind in BuildingKind::ALL {
+            assert_eq!(
+                module_sockets(kind).len(),
+                usize::from(kind.module_slots()),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn module_preview_picks_the_nearest_free_socket() {
+        let mut w = world();
+        let aim = spawn_aim(&w);
+        let furnace = try_place(&w, BuildingKind::Furnace, aim, FAR).building;
+        let id = w
+            .sim
+            .add_building(BuildingKind::Furnace, furnace.x, furnace.z)
+            .unwrap();
+        w.placed.insert(id, furnace.clone());
+
+        let near_second = furnace.socket_world(1).unwrap() + Vec3::Y * 0.1;
+        let p = preview_module(ModuleKind::Speed, id, near_second, &w.sim, &w.placed).unwrap();
+        assert_eq!((p.socket, p.result), (1, Ok(())));
+
+        w.sim.attach_module(id, 1, ModuleKind::Speed).unwrap();
+        let p = preview_module(ModuleKind::Speed, id, near_second, &w.sim, &w.placed).unwrap();
+        assert_eq!(
+            p.socket, 0,
+            "le second est pris : on bascule sur le premier"
+        );
+        w.sim.attach_module(id, 0, ModuleKind::Efficiency).unwrap();
+        let p = preview_module(ModuleKind::Speed, id, near_second, &w.sim, &w.placed).unwrap();
+        assert_eq!(p.result, Err(ModuleError::NoSuchSocket));
     }
 
     #[test]

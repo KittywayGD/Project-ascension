@@ -11,6 +11,7 @@ mod debug;
 mod interaction;
 mod inventory;
 mod player;
+mod scene;
 mod simulation;
 mod ui;
 mod world;
@@ -26,12 +27,13 @@ fn main() -> AppExit {
     let options = match LaunchOptions::parse(std::env::args().skip(1)) {
         Ok(options) => options,
         Err(message) => {
-            eprintln!("Erreur : {message}\nUsage : cargo dev -- [--seed <entier>]");
+            eprintln!("Erreur : {message}\nUsage : cargo dev -- [--seed <entier>] [--demo]");
             return AppExit::error();
         }
     };
 
     App::new()
+        .insert_resource(building::DemoRequested(options.demo))
         .insert_resource(WorldParams {
             seed: options.seed_or_random(),
             config: WorldGenConfig::default(),

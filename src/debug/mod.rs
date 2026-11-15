@@ -4,10 +4,10 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 
 use crate::app::PlayState;
-use crate::building::BuildMode;
+use crate::building::{BuildMode, StreamStats, VIEW_LOAD_M};
 use crate::interaction::{Aim, Target};
 use crate::inventory::ItemKind;
-use crate::player::{EYE_HEIGHT, MoveMode, Player};
+use crate::player::{EYE_HEIGHT, MoveMode, Player, PlayerInventory};
 use crate::simulation::Simulation;
 use crate::simulation::clock::TICK_RATE_HZ;
 use crate::simulation::production::{MachineState, extractor_rate_per_min};
@@ -15,6 +15,9 @@ use crate::simulation::sim_world::{BuildingKind, Machine};
 use crate::world::deposits::ResourceKind;
 use crate::world::generation::WORLDGEN_VERSION;
 use crate::world::{Deposits, Rocks, Terrain};
+
+/// Minerais de chaque type donnés par l'outil « G ».
+const GIVE_ITEMS: u32 = 50;
 
 /// Objets ajoutés par l'outil « I » dans la machine visée.
 const TEST_ITEMS: u32 = 10;
@@ -69,7 +72,7 @@ fn spawn_ui(mut commands: Commands) {
             Text::new(
                 "PAUSE\n\nClic ou Échap : jouer\nMaj + Échap : quitter\n\
                  Tab : inventaire · E : ouvrir une machine · B : construction\n\
-                 F3 : overlay debug · T : vitesse du temps",
+                 F3 : overlay debug · T : vitesse du temps · H : aide complète",
             ),
             TextFont::from_font_size(22.0),
             TextColor(Color::WHITE),
@@ -91,12 +94,22 @@ fn toggle_overlay(
     }
 }
 
-/// Outils de test : T change la vitesse du temps ; I remplit la machine visée (sortie de
-/// l'extracteur, entrée du four) et O vide sa sortie, pour tester blocages et reprises.
-fn test_tools(keys: Res<ButtonInput<KeyCode>>, target: Res<Target>, mut sim: ResMut<Simulation>) {
+/// Outils de test : T change la vitesse du temps ; G donne des minerais ; I remplit la
+/// machine visée (sortie de l'extracteur, entrée du four) et O vide sa sortie.
+fn test_tools(
+    keys: Res<ButtonInput<KeyCode>>,
+    target: Res<Target>,
+    mut sim: ResMut<Simulation>,
+    mut inventory: ResMut<PlayerInventory>,
+) {
     if keys.just_pressed(KeyCode::KeyT) {
         sim.cycle_speed();
         info!("Vitesse de simulation ×{}", sim.speed);
+    }
+    if keys.just_pressed(KeyCode::KeyG) {
+        let iron = inventory.0.add(ItemKind::IronOre, GIVE_ITEMS);
+        let copper = inventory.0.add(ItemKind::CopperOre, GIVE_ITEMS);
+        info!("Outil de test : +{iron} minerais de fer, +{copper} de cuivre dans l'inventaire");
     }
     let Some(id) = target.0.building() else {
         return;
@@ -135,6 +148,7 @@ fn update_overlay(
     deposits: Res<Deposits>,
     target: Res<Target>,
     build: Res<BuildMode>,
+    stream: Res<StreamStats>,
     player: Single<(&Transform, &Player)>,
     mut overlay: Single<&mut Text, With<DebugOverlay>>,
 ) {
@@ -226,23 +240,25 @@ fn update_overlay(
             None => {}
         }
     }
-    let (mut theoretical, mut measured) = (0, 0.0);
+    let (mut theoretical, mut measured) = (0.0, 0.0);
     for (_, e) in world.extractors() {
-        theoretical += e.rate_per_min();
+        theoretical += e.effective_rate_per_min();
         measured += e.measured_rate_per_min(now);
     }
     let in_transit: usize = world.conveyors().map(|(_, c)| c.len()).sum();
     lines.push(format!(
-        "Bâtiments : {} extracteur(s), {} générateur(s), {} four(s), {} coffre(s), {} poteau(x), {} convoyeur(s) ({in_transit} objets en route)",
+        "Bâtiments : {} extracteur(s), {} générateur(s), {} four(s), {} coffre(s), {} poteau(x), {} hub(s), {} convoyeur(s) ({in_transit} objets en route) · {} module(s)",
         counts[0],
         counts[1],
         counts[2],
         counts[3],
         counts[4],
-        world.conveyors().count()
+        counts[5],
+        world.conveyors().count(),
+        world.modules().count()
     ));
     lines.push(format!(
-        "Machines : {active} actives, {stopped} à l'arrêt · extraction {theoretical}/min théorique, {measured:.1}/min réel"
+        "Machines : {active} actives, {stopped} à l'arrêt · extraction {theoretical:.1}/min théorique, {measured:.1}/min réel"
     ));
     // Réseaux qui contiennent au moins un générateur ou plusieurs bâtiments.
     let networks: Vec<String> = world
@@ -267,6 +283,12 @@ fn update_overlay(
         format!("Réseaux : {}", networks.join(" · "))
     });
     lines.push(format!(
+        "Affichage : {}/{} bâtiments chargés (rayon {VIEW_LOAD_M:.0} m) · simulation : {} bâtiments, tous actifs",
+        stream.loaded,
+        stream.total,
+        world.buildings().count()
+    ));
+    lines.push(format!(
         "Rochers : {} / {} ({} détruits)",
         rocks.0.live_count(),
         rocks.0.all().len(),
@@ -280,6 +302,14 @@ fn update_overlay(
             PlayState::Menu => "menu ouvert",
         },
         world.clock().format_elapsed(),
+        sim.speed
+    ));
+    // Charge CPU = coût d'un tick × ticks simulés par seconde (vitesse comprise).
+    let ticks_per_second = (TICK_RATE_HZ * sim.speed) as f32;
+    lines.push(format!(
+        "Simulation : {:.1} µs par tick · charge CPU {:.3} % à ×{}",
+        sim.tick_cost_us,
+        sim.tick_cost_us * ticks_per_second / 1e6 * 100.0,
         sim.speed
     ));
 
@@ -300,11 +330,11 @@ fn describe_aim(aim: Aim, sim: &Simulation, deposits: &Deposits, now: u64) -> St
             let power = world.network_stats(id).map_or(0, |n| n.satisfaction / 10);
             match world.building(id).map(|b| &b.machine) {
                 Some(Machine::Extractor(e)) => format!(
-                    "extracteur #{} à {distance:.1} m · {} · alim. {power} % · {:.1}/min réel ({} théorique) · sortie {}/{} — I : +{TEST_ITEMS} · O : vider · E : ouvrir",
+                    "extracteur #{} à {distance:.1} m · {} · alim. {power} % · {:.1}/min réel ({:.1} théorique) · sortie {}/{} — I : +{TEST_ITEMS} · O : vider · E : ouvrir",
                     id.0,
                     e.state().name(),
                     e.measured_rate_per_min(now),
-                    e.rate_per_min(),
+                    e.effective_rate_per_min(),
                     e.output().count(),
                     e.output().capacity(),
                 ),
@@ -323,6 +353,21 @@ fn describe_aim(aim: Aim, sim: &Simulation, deposits: &Deposits, now: u64) -> St
                 None => format!("bâtiment #{} à {distance:.1} m", id.0),
             }
         }
+        Aim::Module { id, distance } => match sim.world.module(id) {
+            Some(m) => {
+                let stats = sim.world.stats_of(m.host);
+                format!(
+                    "{} #{} à {distance:.1} m sur #{} (emplacement {}) · machine : vitesse {} %, consommation {} %",
+                    m.kind.name().to_lowercase(),
+                    id.0,
+                    m.host.0,
+                    m.socket + 1,
+                    stats.speed_percent,
+                    stats.power_percent
+                )
+            }
+            None => format!("module #{} à {distance:.1} m", id.0),
+        },
         Aim::Conveyor { id, distance } => match sim.world.conveyor(id) {
             Some(c) => format!(
                 "convoyeur #{} à {distance:.1} m · de #{} vers #{} · {}/{} objets · {} livrés · trajet {:.1} s",

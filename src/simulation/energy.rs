@@ -59,15 +59,35 @@ impl PowerGrid {
         nodes.sort_by_key(|n| n.id);
         let range_sq = POLE_RANGE_M * POLE_RANGE_M;
 
+        // Grille spatiale de la taille de la portée : on ne compare un bâtiment qu'aux
+        // 9 cases voisines (coût linéaire au lieu de quadratique).
+        let cell_of = |x: f32, z: f32| {
+            (
+                (x / POLE_RANGE_M).floor() as i32,
+                (z / POLE_RANGE_M).floor() as i32,
+            )
+        };
+        let mut cells: BTreeMap<(i32, i32), Vec<usize>> = BTreeMap::new();
+        for (i, n) in nodes.iter().enumerate() {
+            cells.entry(cell_of(n.x, n.z)).or_default().push(i);
+        }
         let mut edges = Vec::new();
         for (i, a) in nodes.iter().enumerate() {
-            for b in &nodes[i + 1..] {
-                let (dx, dz) = (a.x - b.x, a.z - b.z);
-                if (a.is_pole || b.is_pole) && dx * dx + dz * dz <= range_sq {
-                    edges.push((a.id, b.id));
+            let (cx, cz) = cell_of(a.x, a.z);
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    for &j in cells.get(&(cx + dx, cz + dz)).into_iter().flatten() {
+                        let b = &nodes[j];
+                        let (ox, oz) = (a.x - b.x, a.z - b.z);
+                        if j > i && (a.is_pole || b.is_pole) && ox * ox + oz * oz <= range_sq {
+                            edges.push((a.id, b.id));
+                        }
+                    }
                 }
             }
         }
+        // Ordre canonique : le résultat ne dépend pas du parcours de la grille.
+        edges.sort();
 
         // Union-find sur les indices (nœuds triés par identifiant).
         let index: BTreeMap<BuildingId, usize> =

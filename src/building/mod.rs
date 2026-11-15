@@ -22,14 +22,15 @@ use crate::simulation::energy::{GENERATOR_POWER_W, POLE_RANGE_M};
 use crate::simulation::logistics::{
     CONVEYOR_MAX_LENGTH_M, CONVEYOR_SPEED_MPS, conveyor_max_rate_per_min,
 };
+use crate::simulation::modules::ModuleKind;
 use crate::simulation::production::{
     EXTRACTOR_POWER_W, FURNACE_POWER_W, MachineState, extractor_rate_per_min,
 };
 use crate::simulation::sim_world::{BuildingId, BuildingKind, Machine, STORAGE_SLOTS};
 use crate::world::{Deposits, Rocks, Terrain};
 use placement::{
-    ConveyorPreview, PlacedBuilding, PlacedBuildings, PlacementContext, PlacementPreview, dims,
-    preview, preview_conveyor,
+    ConveyorPreview, MODULE_HALF, ModulePreview, PlacedBuilding, PlacedBuildings, PlacementContext,
+    PlacementPreview, dims, preview, preview_conveyor, preview_module,
 };
 
 /// Outil de construction choisi dans le menu.
@@ -37,23 +38,28 @@ use placement::{
 pub enum BuildTool {
     Building(BuildingKind),
     Conveyor,
+    Module(ModuleKind),
 }
 
 impl BuildTool {
     /// Ordre d'affichage dans le menu de construction.
-    pub const ALL: [BuildTool; 6] = [
+    pub const ALL: [BuildTool; 9] = [
         BuildTool::Building(BuildingKind::Extractor),
         BuildTool::Building(BuildingKind::Generator),
         BuildTool::Building(BuildingKind::Furnace),
         BuildTool::Building(BuildingKind::Storage),
         BuildTool::Building(BuildingKind::Pole),
+        BuildTool::Building(BuildingKind::Hub),
         BuildTool::Conveyor,
+        BuildTool::Module(ModuleKind::Speed),
+        BuildTool::Module(ModuleKind::Efficiency),
     ];
 
     pub fn name(self) -> &'static str {
         match self {
             BuildTool::Building(kind) => kind.name(),
             BuildTool::Conveyor => "Convoyeur",
+            BuildTool::Module(kind) => kind.name(),
         }
     }
 
@@ -72,9 +78,15 @@ impl BuildTool {
             }
             BuildTool::Building(BuildingKind::Storage) => format!("{STORAGE_SLOTS} cases"),
             BuildTool::Building(BuildingKind::Pole) => format!("portée {POLE_RANGE_M:.0} m"),
+            BuildTool::Building(BuildingKind::Hub) => "accepte tout · objectifs".to_string(),
             BuildTool::Conveyor => format!(
                 "{}/min max · {CONVEYOR_MAX_LENGTH_M:.0} m max",
                 conveyor_max_rate_per_min()
+            ),
+            BuildTool::Module(kind) => format!(
+                "vitesse {:+} % · consommation {:+} %",
+                kind.speed_bonus(),
+                kind.power_bonus()
             ),
         }
     }
@@ -88,7 +100,7 @@ impl BuildTool {
                 "Alimente les machines reliées par des poteaux."
             }
             BuildTool::Building(BuildingKind::Furnace) => {
-                "Fond le minerai en plaques. Entrée à l'arrière, sortie à droite."
+                "Fond le minerai en plaques. Entrée à l'arrière, sortie à l'avant."
             }
             BuildTool::Building(BuildingKind::Storage) => {
                 "Stocke tout ce qu'on lui apporte. Entrée à l'arrière, sortie à l'avant."
@@ -96,8 +108,17 @@ impl BuildTool {
             BuildTool::Building(BuildingKind::Pole) => {
                 "Relie au réseau tout bâtiment à portée, et les autres poteaux."
             }
+            BuildTool::Building(BuildingKind::Hub) => {
+                "Reçoit les livraisons (entrée à l'arrière) et suit tes objectifs."
+            }
             BuildTool::Conveyor => {
                 "Relie une sortie (bloc jaune) à une entrée (bloc bleu). Deux clics."
+            }
+            BuildTool::Module(ModuleKind::Speed) => {
+                "Se fixe sur le toit d'un extracteur ou d'un four : plus rapide, plus gourmand."
+            }
+            BuildTool::Module(ModuleKind::Efficiency) => {
+                "Se fixe sur le toit d'un extracteur ou d'un four : consomme moins."
             }
         }
     }
@@ -138,6 +159,10 @@ impl BuildMode {
     }
 }
 
+/// La scène de démonstration est-elle demandée au lancement (`--demo`) ?
+#[derive(Resource, Debug, Default)]
+pub struct DemoRequested(pub bool);
+
 /// Bâtiments posés (données de jeu) et leurs entités d'affichage.
 #[derive(Resource, Debug, Default)]
 pub struct Buildings(pub PlacedBuildings);
@@ -145,11 +170,37 @@ pub struct Buildings(pub PlacedBuildings);
 #[derive(Resource, Debug, Default)]
 struct BuildingEntities(HashMap<BuildingId, Entity>);
 
+/// Rayon d'affichage des bâtiments autour du joueur, en mètres.
+pub const VIEW_LOAD_M: f32 = 150.0;
+/// Au-delà, l'affichage est déchargé (écart avec `VIEW_LOAD_M` : pas de clignotement).
+pub const VIEW_UNLOAD_M: f32 = 170.0;
+
+/// Faut-il charger (`Some(true)`) ou décharger (`Some(false)`) l'affichage d'un bâtiment
+/// à cette distance horizontale du joueur ? `None` : ne rien changer.
+pub fn visibility_change(distance: f32, loaded: bool) -> Option<bool> {
+    match (loaded, distance) {
+        (false, d) if d <= VIEW_LOAD_M => Some(true),
+        (true, d) if d > VIEW_UNLOAD_M => Some(false),
+        _ => None,
+    }
+}
+
+/// Bilan de l'affichage : seuls les bâtiments proches ont des entités, la simulation
+/// continue pour tous (M6).
+#[derive(Resource, Debug, Default)]
+pub struct StreamStats {
+    pub loaded: usize,
+    pub total: usize,
+    /// Incrémenté à chaque chargement / déchargement (pour redessiner les câbles).
+    version: u64,
+}
+
 /// Aperçu de pose courant (pour le fantôme et le bandeau d'aide).
 #[derive(Resource, Debug, Default)]
 pub struct Preview {
     pub building: Option<PlacementPreview>,
     pub conveyor: Option<ConveyorPreview>,
+    pub module: Option<ModulePreview>,
 }
 
 /// Rôle d'une pièce de modèle : certaines changent d'aspect selon l'état de la machine.
@@ -195,6 +246,11 @@ struct BuildingAssets {
     /// Ports du fantôme : toujours bleu (entrée) et jaune (sortie), quelle que soit la validité.
     ghost_input: Handle<StandardMaterial>,
     ghost_output: Handle<StandardMaterial>,
+    module_body: Handle<Mesh>,
+    module_cap: Handle<Mesh>,
+    module_materials: HashMap<ModuleKind, Handle<StandardMaterial>>,
+    module_glow: HashMap<ModuleKind, Handle<StandardMaterial>>,
+    module_idle: Handle<StandardMaterial>,
 }
 
 #[derive(Component)]
@@ -202,6 +258,17 @@ struct Ghost(BuildingKind);
 
 #[derive(Component)]
 struct ConveyorGhost;
+
+#[derive(Component)]
+struct ModuleGhost;
+
+/// Affichage d'un module posé.
+#[derive(Component)]
+struct ModuleVisual(BuildingId);
+
+/// Pastille d'un module, allumée quand sa machine travaille.
+#[derive(Component)]
+struct ModuleIndicator(BuildingId);
 
 #[derive(Component)]
 struct GhostPart;
@@ -242,7 +309,12 @@ impl Plugin for BuildingPlugin {
             .init_resource::<Buildings>()
             .init_resource::<BuildingEntities>()
             .init_resource::<Preview>()
-            .add_systems(Startup, (setup_assets, spawn_ghosts, spawn_hud).chain())
+            .init_resource::<StreamStats>()
+            .init_resource::<DemoRequested>()
+            .add_systems(
+                Startup,
+                (setup_assets, spawn_ghosts, spawn_hud, build_demo_scene).chain(),
+            )
             .add_systems(
                 Update,
                 (rotate_key, update_preview, update_ghosts, place, remove)
@@ -253,9 +325,12 @@ impl Plugin for BuildingPlugin {
             .add_systems(
                 Update,
                 (
+                    stream_buildings,
                     update_status_parts,
                     update_cables,
                     sync_conveyors,
+                    sync_modules,
+                    update_module_indicators,
                     update_conveyor_items,
                     update_hud,
                 )
@@ -302,6 +377,8 @@ fn setup_assets(
     let brick = plain(&mut materials, Color::srgb(0.55, 0.30, 0.22));
     let wood = plain(&mut materials, Color::srgb(0.45, 0.32, 0.20));
     let crate_wood = plain(&mut materials, Color::srgb(0.62, 0.47, 0.28));
+    let hub_base = plain(&mut materials, Color::srgb(0.22, 0.20, 0.30));
+    let hub_gold = plain(&mut materials, Color::srgb(0.85, 0.68, 0.25));
     let light_active = glow(
         &mut materials,
         Color::srgb(0.2, 0.9, 0.3),
@@ -334,7 +411,6 @@ fn setup_assets(
     let light_mesh = meshes.add(Sphere::new(0.2));
     // Ports : bloc jaune = sortie, bloc bleu = entrée (même position que dans `placement.rs`).
     let port_z = meshes.add(Cuboid::new(0.8, 0.8, 0.3));
-    let port_x = meshes.add(Cuboid::new(0.3, 0.8, 0.8));
     let mut parts = HashMap::new();
     parts.insert(
         BuildingKind::Extractor,
@@ -404,9 +480,10 @@ fn setup_assets(
                 PartRole::Plain,
             ),
             part(
-                meshes.add(Cuboid::new(1.0, 0.7, 0.12)),
+                // Gueule sur le côté gauche : l'avant porte la sortie, l'arrière l'entrée.
+                meshes.add(Cuboid::new(0.12, 0.7, 1.0)),
                 &mouth_idle,
-                Vec3::new(0.0, 0.7, -1.22),
+                Vec3::new(-1.22, 0.7, 0.0),
                 PartRole::Mouth,
             ),
             part(
@@ -422,9 +499,9 @@ fn setup_assets(
                 PartRole::InputPort,
             ),
             part(
-                port_x,
+                port_z.clone(),
                 &output,
-                Vec3::new(1.35, 0.7, 0.0),
+                Vec3::new(0.0, 0.7, -1.35),
                 PartRole::OutputPort,
             ),
             part(
@@ -457,10 +534,45 @@ fn setup_assets(
                 PartRole::InputPort,
             ),
             part(
-                port_z,
+                port_z.clone(),
                 &output,
                 Vec3::new(0.0, 0.5, -0.85),
                 PartRole::OutputPort,
+            ),
+        ],
+    );
+    parts.insert(
+        BuildingKind::Hub,
+        vec![
+            part(
+                meshes.add(Cuboid::new(2.8, 0.6, 2.8)),
+                &hub_base,
+                Vec3::new(0.0, 0.3, 0.0),
+                PartRole::Plain,
+            ),
+            part(
+                meshes.add(Cylinder::new(0.45, 2.4)),
+                &hub_base,
+                Vec3::new(0.0, 1.8, 0.0),
+                PartRole::Plain,
+            ),
+            part(
+                meshes.add(Torus::new(0.55, 0.75)),
+                &hub_gold,
+                Vec3::new(0.0, 2.6, 0.0),
+                PartRole::Plain,
+            ),
+            part(
+                meshes.add(Sphere::new(0.3)),
+                &light_waiting,
+                Vec3::new(0.0, 3.15, 0.0),
+                PartRole::Light,
+            ),
+            part(
+                port_z.clone(),
+                &input,
+                Vec3::new(0.0, 0.6, 1.35),
+                PartRole::InputPort,
             ),
         ],
     );
@@ -518,6 +630,27 @@ fn setup_assets(
         ghost_invalid: ghost(&mut materials, Color::srgba(1.0, 0.25, 0.2, 0.40)),
         ghost_input: ghost(&mut materials, Color::srgba(0.25, 0.55, 1.0, 0.9)),
         ghost_output: ghost(&mut materials, Color::srgba(1.0, 0.85, 0.15, 0.9)),
+        module_body: meshes.add(Cuboid::new(
+            2.0 * MODULE_HALF.x,
+            2.0 * MODULE_HALF.y - 0.1,
+            2.0 * MODULE_HALF.z,
+        )),
+        module_cap: meshes.add(Cuboid::new(0.35, 0.1, 0.35)),
+        module_materials: [
+            (ModuleKind::Speed, Color::srgb(0.12, 0.50, 0.62)),
+            (ModuleKind::Efficiency, Color::srgb(0.22, 0.55, 0.28)),
+        ]
+        .into_iter()
+        .map(|(kind, color)| (kind, plain(&mut materials, color)))
+        .collect(),
+        module_glow: [
+            (ModuleKind::Speed, LinearRgba::rgb(0.3, 2.5, 4.0)),
+            (ModuleKind::Efficiency, LinearRgba::rgb(0.6, 4.0, 0.8)),
+        ]
+        .into_iter()
+        .map(|(kind, emissive)| (kind, glow(&mut materials, Color::WHITE, emissive)))
+        .collect(),
+        module_idle: plain(&mut materials, Color::srgb(0.15, 0.15, 0.17)),
     });
 }
 
@@ -578,6 +711,15 @@ fn spawn_ghosts(mut commands: Commands, assets: Res<BuildingAssets>) {
                 }
             });
     }
+    commands.spawn((
+        Name::new("Fantôme : module"),
+        ModuleGhost,
+        NotShadowCaster,
+        Mesh3d(assets.module_body.clone()),
+        MeshMaterial3d(assets.ghost_valid.clone()),
+        Transform::default(),
+        Visibility::Hidden,
+    ));
     commands.spawn((
         Name::new("Fantôme : convoyeur"),
         ConveyorGhost,
@@ -650,6 +792,19 @@ fn update_preview(
                 current.building = Some(preview(kind, point, build.rotation, &ctx));
             }
         }
+        BuildTool::Module(kind) => {
+            // Machine visée : directement, ou à travers un module déjà posé sur son toit.
+            let (host, distance) = match target.0 {
+                Aim::Building { id, distance } => (id, distance),
+                Aim::Module { id, distance } => match sim.world.module(id) {
+                    Some(m) => (m.host, distance),
+                    None => return,
+                },
+                _ => return,
+            };
+            let hit = player.translation + player.forward().as_vec3() * distance;
+            current.module = preview_module(kind, host, hit, &sim.world, &buildings.0);
+        }
         BuildTool::Conveyor => {
             let Some(from) = build.conveyor_from else {
                 return;
@@ -692,6 +847,19 @@ fn update_ghosts(
         ),
         (With<ConveyorGhost>, Without<Ghost>, Without<GhostPart>),
     >,
+    module_ghost: Single<
+        (
+            &mut Transform,
+            &mut Visibility,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        (
+            With<ModuleGhost>,
+            Without<ConveyorGhost>,
+            Without<Ghost>,
+            Without<GhostPart>,
+        ),
+    >,
 ) {
     let material_for = |ok: bool| {
         if ok {
@@ -724,6 +892,23 @@ fn update_ghosts(
                 if is_foundation {
                     *part_transform = foundation_transform(&p.building);
                 }
+            }
+        }
+    }
+
+    let (mut transform, mut visibility, mut material) = module_ghost.into_inner();
+    match &preview.module {
+        Some(m) => {
+            *visibility = Visibility::Inherited;
+            *transform = Transform::from_translation(m.position + Vec3::Y * MODULE_HALF.y);
+            let wanted = material_for(m.result.is_ok());
+            if material.0 != *wanted {
+                material.0 = wanted.clone();
+            }
+        }
+        None => {
+            if *visibility != Visibility::Hidden {
+                *visibility = Visibility::Hidden;
             }
         }
     }
@@ -763,6 +948,24 @@ fn place(
     }
     match build.tool {
         BuildTool::Conveyor => place_conveyor(&mut build, &preview, &target, &mut sim),
+        BuildTool::Module(kind) => {
+            let Some(p) = &preview.module else {
+                return;
+            };
+            match p
+                .result
+                .and_then(|()| sim.world.attach_module(p.host, p.socket, kind))
+            {
+                Ok(id) => info!(
+                    "{} #{} fixé sur #{} (emplacement {})",
+                    kind.name(),
+                    id.0,
+                    p.host.0,
+                    p.socket + 1
+                ),
+                Err(error) => info!("Module refusé : {}", error.message()),
+            }
+        }
         BuildTool::Building(_) => {
             let Some(preview) = &preview.building else {
                 return;
@@ -895,6 +1098,15 @@ fn remove(
         return;
     }
     match target.0 {
+        Aim::Module { id, .. } => {
+            if let Some(module) = sim.world.detach_module(id) {
+                info!(
+                    "{} retiré de #{} (contenu de la machine conservé)",
+                    module.kind.name(),
+                    module.host.0
+                );
+            }
+        }
         Aim::Conveyor { id, .. } => {
             if let Some(conveyor) = sim.world.remove_conveyor(id) {
                 info!(
@@ -954,6 +1166,18 @@ fn update_status_parts(
             Some(Machine::Extractor(e)) => state_light(e.state()),
             Some(Machine::Furnace(f)) => state_light(f.state()),
             Some(Machine::Generator(g)) if g.enabled => &assets.light_active,
+            // Hub : vert quand un convoyeur lui apporte quelque chose.
+            Some(Machine::Hub) => {
+                let receiving = sim
+                    .world
+                    .conveyors()
+                    .any(|(_, c)| c.to == *id && c.len() > 0);
+                if receiving {
+                    &assets.light_active
+                } else {
+                    &assets.light_waiting
+                }
+            }
             _ => &assets.light_off,
         };
         if material.0 != *wanted {
@@ -980,12 +1204,14 @@ fn update_status_parts(
 fn update_cables(
     sim: Res<Simulation>,
     buildings: Res<Buildings>,
+    entities: Res<BuildingEntities>,
+    stream: Res<StreamStats>,
     assets: Res<BuildingAssets>,
-    mut drawn_version: Local<u64>,
+    mut drawn_version: Local<(u64, u64)>,
     cables: Query<Entity, With<Cable>>,
     mut commands: Commands,
 ) {
-    let version = sim.world.grid_version();
+    let version = (sim.world.grid_version(), stream.version);
     if version == *drawn_version {
         return;
     }
@@ -994,6 +1220,10 @@ fn update_cables(
         commands.entity(cable).despawn();
     }
     for (a, b) in sim.world.grid().edges() {
+        // Seulement entre deux bâtiments affichés.
+        if !entities.0.contains_key(a) || !entities.0.contains_key(b) {
+            continue;
+        }
         let (Some(a), Some(b)) = (buildings.0.get(*a), buildings.0.get(*b)) else {
             continue;
         };
@@ -1013,12 +1243,21 @@ fn update_cables(
 fn sync_conveyors(
     sim: Res<Simulation>,
     buildings: Res<Buildings>,
+    entities: Res<BuildingEntities>,
     assets: Res<BuildingAssets>,
     visuals: Query<(Entity, &ConveyorVisual)>,
     mut commands: Commands,
 ) {
+    // Un tapis est affiché si ses deux bâtiments le sont.
+    let shown = |from: &BuildingId, to: &BuildingId| {
+        entities.0.contains_key(from) && entities.0.contains_key(to)
+    };
     for (entity, visual) in &visuals {
-        if sim.world.conveyor(visual.id).is_none() {
+        let keep = sim
+            .world
+            .conveyor(visual.id)
+            .is_some_and(|c| shown(&c.from, &c.to));
+        if !keep {
             for item in &visual.pool {
                 commands.entity(*item).despawn();
             }
@@ -1026,7 +1265,7 @@ fn sync_conveyors(
         }
     }
     for (id, conveyor) in sim.world.conveyors() {
-        if visuals.iter().any(|(_, v)| v.id == id) {
+        if !shown(&conveyor.from, &conveyor.to) || visuals.iter().any(|(_, v)| v.id == id) {
             continue;
         }
         let Some((from, to)) = buildings.0.conveyor_ends(conveyor.from, conveyor.to) else {
@@ -1124,6 +1363,22 @@ fn update_hud(
     let facing = ["nord (-Z)", "ouest (-X)", "sud (+Z)", "est (+X)"][usize::from(build.rotation)];
 
     let (title, status) = match build.tool {
+        BuildTool::Module(kind) => {
+            let title = format!(
+                "{} · vitesse {:+} %, consommation {:+} %",
+                kind.name().to_uppercase(),
+                kind.speed_bonus(),
+                kind.power_bonus()
+            );
+            let status = match &preview.module {
+                None => "Vise un extracteur ou un four (2 emplacements sur le toit)".to_string(),
+                Some(p) => match p.result {
+                    Ok(()) => format!("OK : emplacement {} sur #{}", p.socket + 1, p.host.0),
+                    Err(error) => format!("Impossible : {}", error.message()),
+                },
+            };
+            (title, status)
+        }
         BuildTool::Conveyor => {
             let title = "CONVOYEUR".to_string();
             let status = match (build.conveyor_from, &preview.conveyor) {
@@ -1162,6 +1417,7 @@ fn update_hud(
             let ports = match (kind.has_input(), kind.has_output()) {
                 (true, true) => " · bleu : entrée, jaune : sortie",
                 (false, true) => " · jaune : sortie",
+                (true, false) => " · bleu : entrée",
                 _ => "",
             };
             let title = format!(
@@ -1204,4 +1460,174 @@ fn update_hud(
         "{title}\n{status}\n\
          Clic gauche : poser · R : tourner · Clic droit : démonter · B : menu · Échap : arrêter"
     );
+}
+
+/// Crée l'affichage des nouveaux modules et retire celui des modules disparus.
+fn sync_modules(
+    sim: Res<Simulation>,
+    buildings: Res<Buildings>,
+    entities: Res<BuildingEntities>,
+    assets: Res<BuildingAssets>,
+    visuals: Query<(Entity, &ModuleVisual)>,
+    mut commands: Commands,
+) {
+    // Un module est affiché si sa machine l'est.
+    for (entity, ModuleVisual(id)) in &visuals {
+        let keep = sim
+            .world
+            .module(*id)
+            .is_some_and(|m| entities.0.contains_key(&m.host));
+        if !keep {
+            commands.entity(entity).despawn();
+        }
+    }
+    for (id, module) in sim.world.modules() {
+        if !entities.0.contains_key(&module.host)
+            || visuals.iter().any(|(_, ModuleVisual(v))| *v == id)
+        {
+            continue;
+        }
+        let Some(host) = buildings.0.get(module.host) else {
+            continue;
+        };
+        let Some(base) = host.socket_world(module.socket) else {
+            continue;
+        };
+        let body_height = 2.0 * MODULE_HALF.y - 0.1;
+        commands
+            .spawn((
+                Name::new(format!("{} #{}", module.kind.name(), id.0)),
+                ModuleVisual(id),
+                Transform::from_translation(base)
+                    .with_rotation(Quat::from_rotation_y(f32::from(host.rotation) * FRAC_PI_2)),
+                Visibility::default(),
+            ))
+            .with_children(|root| {
+                root.spawn((
+                    Mesh3d(assets.module_body.clone()),
+                    MeshMaterial3d(assets.module_materials[&module.kind].clone()),
+                    Transform::from_xyz(0.0, body_height / 2.0, 0.0),
+                ));
+                root.spawn((
+                    ModuleIndicator(id),
+                    Mesh3d(assets.module_cap.clone()),
+                    MeshMaterial3d(assets.module_idle.clone()),
+                    Transform::from_xyz(0.0, body_height + 0.05, 0.0),
+                ));
+            });
+    }
+}
+
+/// Pastille allumée quand la machine du module travaille, éteinte sinon.
+fn update_module_indicators(
+    sim: Res<Simulation>,
+    assets: Res<BuildingAssets>,
+    mut indicators: Query<(&ModuleIndicator, &mut MeshMaterial3d<StandardMaterial>)>,
+) {
+    for (ModuleIndicator(id), mut material) in &mut indicators {
+        let Some(module) = sim.world.module(*id) else {
+            continue;
+        };
+        let active = match sim.world.building(module.host).map(|b| &b.machine) {
+            Some(Machine::Extractor(e)) => e.state() == MachineState::Active,
+            Some(Machine::Furnace(f)) => f.state() == MachineState::Active,
+            _ => false,
+        };
+        let wanted = if active {
+            &assets.module_glow[&module.kind]
+        } else {
+            &assets.module_idle
+        };
+        if material.0 != *wanted {
+            material.0 = wanted.clone();
+        }
+    }
+}
+
+/// M6 : charge l'affichage des bâtiments proches du joueur et décharge celui des
+/// bâtiments lointains. **La simulation n'est jamais touchée** : une usine déchargée
+/// continue de produire, et son affichage est recréé à l'identique au retour du joueur.
+fn stream_buildings(
+    player: Single<&Transform, With<Player>>,
+    buildings: Res<Buildings>,
+    assets: Res<BuildingAssets>,
+    mut entities: ResMut<BuildingEntities>,
+    mut stats: ResMut<StreamStats>,
+    mut commands: Commands,
+) {
+    let p = player.translation;
+    let mut changed = false;
+    for (id, building) in buildings.0.iter() {
+        let distance = (building.x - p.x).hypot(building.z - p.z);
+        match visibility_change(distance, entities.0.contains_key(&id)) {
+            Some(true) => {
+                let entity = spawn_building(&mut commands, &assets, id, building);
+                entities.0.insert(id, entity);
+                changed = true;
+            }
+            Some(false) => {
+                if let Some(entity) = entities.0.remove(&id) {
+                    commands.entity(entity).despawn();
+                }
+                changed = true;
+            }
+            None => {}
+        }
+    }
+    let (loaded, total) = (entities.0.len(), buildings.0.iter().count());
+    if changed || stats.loaded != loaded || stats.total != total {
+        stats.loaded = loaded;
+        stats.total = total;
+        stats.version += 1;
+    }
+}
+
+/// Construit la scène de démonstration au lancement si `--demo` est passé.
+/// L'affichage suit tout seul : `stream_buildings` crée les entités des bâtiments proches.
+fn build_demo_scene(
+    demo: Res<DemoRequested>,
+    terrain: Res<Terrain>,
+    deposits: Res<Deposits>,
+    rocks: Res<Rocks>,
+    mut sim: ResMut<Simulation>,
+    mut buildings: ResMut<Buildings>,
+) {
+    if !demo.0 {
+        return;
+    }
+    match crate::scene::build_demo(
+        &terrain.0,
+        &deposits.0,
+        &rocks.0,
+        &mut sim.world,
+        &mut buildings.0,
+    ) {
+        Ok(scene) => info!(
+            "Scène de démo construite : {} bâtiments, {} convoyeurs, {} modules",
+            scene.buildings, scene.conveyors, scene.modules
+        ),
+        Err(error) => warn!("Scène de démo impossible : {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_loads_near_and_unloads_far_with_hysteresis() {
+        assert_eq!(visibility_change(100.0, false), Some(true));
+        assert_eq!(
+            visibility_change(160.0, false),
+            None,
+            "entre les deux : pas encore"
+        );
+        assert_eq!(
+            visibility_change(160.0, true),
+            None,
+            "entre les deux : on garde"
+        );
+        assert_eq!(visibility_change(200.0, true), Some(false));
+        assert_eq!(visibility_change(100.0, true), None);
+    }
 }

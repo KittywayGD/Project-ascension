@@ -195,9 +195,9 @@ project-ascension/
 - [x] Découper le terrain en secteurs stables, indépendants de la caméra (chunks de 64 × 64 m).
 - [x] Éviter les fissures visibles aux frontières des secteurs (heightmap et normales globales, test dédié).
 - [x] Générer/préparer les maillages sans bloquer excessivement la frame principale (génération 8 ms + maillage 17 ms au démarrage).
-- [ ] Afficher/masquer les secteurs selon la distance de vue.
-- [ ] Libérer les ressources graphiques des secteurs non visibles.
-- [ ] **Ne pas supprimer les données de simulation** quand un secteur est masqué.
+- [ ] Afficher/masquer les secteurs selon la distance de vue (terrain : inutile à 512 m, tout reste affiché ; bâtiments : fait en M6).
+- [ ] Libérer les ressources graphiques des secteurs non visibles (idem : bâtiments déchargés au-delà de 170 m).
+- [x] **Ne pas supprimer les données de simulation** quand un secteur est masqué.
 - [ ] Ajouter LOD **uniquement lorsque les mesures montrent qu'il est nécessaire**.
 
 ### Génération à plus grande échelle ↗ (après M5 / post-V0)
@@ -341,46 +341,46 @@ project-ascension/
 
 ### Concepts
 
-- [ ] Définir un **noyau** de machine (identité, inventaire, recette, énergie, états).
-- [ ] Définir les **modules comme des objets du monde**, attachés physiquement à un noyau.
-- [ ] Définir des points d'attache / faces compatibles (`Socket`) pour la V0.
-- [ ] Définir une règle lisible de **rattachement** (distance, orientation, compatibilité, unicité).
-- [ ] Définir des limites explicites pour éviter les configurations invalides ou les cycles d'attachement.
-- [ ] Choisir comment représenter et stocker les modules connectés au noyau.
-- [ ] Séparer **effet de simulation** et **modèle visuel** du module.
-- [ ] Ne pas coder des exceptions spécifiques à chaque type de machine si une règle générique suffit.
+- [x] Définir un **noyau** de machine : extracteur et four (identité, inventaires, recette, énergie, états, `MachineStats`).
+- [x] Définir les **modules comme des objets du monde**, attachés physiquement à un noyau (visibles sur le toit).
+- [x] Définir des points d'attache (`Socket`) : 2 emplacements sur le toit de chaque noyau.
+- [x] Définir une règle lisible de **rattachement** : noyau compatible, un module par emplacement, emplacement libre le plus proche du point visé.
+- [x] Définir des limites explicites : 2 modules par noyau, jamais de module sur un module (aucun cycle), consommation ≥ 20 %.
+- [x] Choisir comment représenter et stocker les modules : `SimWorld.modules` (id stable, hôte, emplacement), stats recalculées à chaque changement.
+- [x] Séparer **effet de simulation** (`simulation/modules.rs`) et **modèle visuel** (`building/mod.rs`).
+- [x] Ne pas coder des exceptions spécifiques à chaque type de machine : bonus additifs génériques appliqués à toute machine.
 
 ### Deux modules de démonstration
 
-- [ ] Ajouter un module **vitesse** qui réduit le temps de traitement et augmente la demande de puissance.
-- [ ] Ajouter un module **efficacité** qui diminue la consommation (règle exacte à équilibrer plus tard).
-- [ ] Recalculer les statistiques à l'ajout ou retrait d'un module.
-- [ ] Autoriser le retrait sans perdre ni dupliquer le contenu de la machine.
-- [ ] Afficher clairement les stats résultantes dans l'interface.
-- [ ] Ajouter effets visuels discrets sur les modules actifs/inactifs.
-- [ ] Prévoir le traitement des modules incompatibles ou détachés.
+- [x] Ajouter un module **vitesse** : +50 % de vitesse, +60 % de consommation.
+- [x] Ajouter un module **efficacité** : −30 % de consommation (à équilibrer plus tard).
+- [x] Recalculer les statistiques à l'ajout ou retrait d'un module (immédiat, testé).
+- [x] Autoriser le retrait sans perdre ni dupliquer le contenu de la machine (testé).
+- [x] Afficher clairement les stats résultantes dans l'interface (panneau de machine : modules, vitesse, consommation, kW ; débit nominal / théorique / réel).
+- [x] Ajouter effets visuels discrets sur les modules actifs/inactifs (pastille lumineuse quand la machine travaille).
+- [x] Prévoir le traitement des modules incompatibles (pose refusée avec motif) ou détachés (retirés avec leur machine, aucun module fantôme).
 
 ### Placement avancé (le placement de base est en M2)
 
-- [ ] Ajouter snap sur faces, fondations et connecteurs selon le type d'objet.
-- [ ] Vérifier les collisions et empêcher les chevauchements non autorisés.
-- [ ] Ajouter suppression/démontage propre des objets construits.
-- [ ] Prévoir des fondations simples pour construire au-dessus du sol irrégulier.
-- [ ] Confirmer la gratuité de la construction en V0 (mode créatif) ; coûts éventuels avec l'arbre techno en V0.1.
+- [x] Ajouter snap selon le type d'objet : grille de 1 m, centre du gisement (extracteur), emplacements de toit (modules), ports (convoyeurs).
+- [x] Vérifier les collisions et empêcher les chevauchements non autorisés (bâtiments, rochers, joueur, gisements).
+- [x] Ajouter suppression/démontage propre des objets construits (bâtiments, convoyeurs, modules ; cascade sans fantôme).
+- [x] Prévoir des fondations simples pour construire au-dessus du sol irrégulier (fondation automatique, 2,5 m max).
+- [x] Confirmer la gratuité de la construction en V0 (mode créatif) ; coûts éventuels avec l'arbre techno en V0.1.
 
 **Validation M4**
 
-- [ ] Le module est visible **dans le monde**, pas seulement une case dans l'UI.
-- [ ] Le même noyau accepte au moins deux types de modules.
-- [ ] Les stats et la production changent immédiatement et correctement.
-- [ ] Placement invalide refusé ; retrait propre ; aucun module fantôme.
+- [x] Le module est visible **dans le monde**, pas seulement une case dans l'UI.
+- [x] Le même noyau accepte au moins deux types de modules (vitesse et efficacité, combinables).
+- [x] Les stats et la production changent immédiatement et correctement (testé : 30 → 45 /min, 30 → 48 kW).
+- [x] Placement invalide refusé ; retrait propre ; aucun module fantôme (testé).
 
 ---
 
 ## M5 — Logistique minimale ⭐
 
 > **Avancé pendant M3 à la demande** : convoyeurs point à point, coffre, glisser-déposer et menu de construction.
-> Il reste le hub, le module de vitesse (M4) et la validation en jeu.
+> Hub et objectifs ajoutés avec M6.
 
 > **Objectif :** une chaîne fonctionnelle. Les convoyeurs animés complets sont facultatifs au début : un transfert par ports connectés suffit pour valider la simulation.
 
@@ -406,9 +406,9 @@ project-ascension/
 
 - [x] Construire **gisement → extracteur → four → coffre** (test headless de 5 min simulées).
 - [x] Alimenter extracteur et four depuis un générateur.
-- [ ] Permettre d'accélérer le broyeur par un module de vitesse.
-- [ ] Tester la saturation du stockage et la reprise après libération de place.
-- [ ] Ajouter un **hub** qui compte les items livrés : il donne un but aux sessions de test et prépare l'arbre techno V0.1.
+- [x] Permettre d'accélérer le four par un module de vitesse.
+- [x] Ajouter un **hub** qui compte les items livrés, avec 5 objectifs successifs (suivi en haut à droite, notification).
+- [x] Tester la saturation du stockage et la reprise après libération de place (tests de convoyeur bloqué).
 
 **Validation M5**
 
@@ -424,16 +424,16 @@ project-ascension/
 
 ### Simulation indépendante du rendu
 
-- [ ] Distinguer chargement **visuel** du terrain et existence **logique** des usines.
-- [ ] Garder en mémoire ou simuler à un niveau agrégé les machines actives hors champ.
-- [ ] Valider la production pendant que les meshes/entités visuelles sont déchargés.
-- [ ] Vérifier qu'une reconnexion visuelle n'entraîne pas de duplication d'objets ni de reset du progrès.
-- [ ] Ajouter un test headless : N ticks simulés sans rendu → production attendue.
+- [x] Distinguer chargement **visuel** et existence **logique** des usines : `SimWorld` contient tout, l'affichage des bâtiments est chargé à 150 m et déchargé à 170 m.
+- [x] Garder en mémoire les machines actives hors champ (simulation complète, pas d'agrégat nécessaire à cette échelle).
+- [x] Valider la production pendant que les entités visuelles sont déchargées (la simulation ignore l'affichage ; overlay « Affichage : x/y chargés »).
+- [x] Vérifier qu'une reconnexion visuelle n'entraîne pas de duplication d'objets ni de reset du progrès (l'affichage est recréé à partir de l'état de simulation, jamais l'inverse).
+- [x] Ajouter un test headless : N ticks simulés sans rendu → production attendue (chaîne extracteur → four → coffre, hub).
 
 **Validation M6**
 
-- [ ] Un test de simulation hors champ donne la production attendue.
-- [ ] S'éloigner puis revenir ne duplique ni ne réinitialise rien.
+- [x] Un test de simulation hors champ donne la production attendue.
+- [ ] S'éloigner puis revenir ne duplique ni ne réinitialise rien (garanti par construction ; à confirmer en jeu).
 
 ---
 
@@ -441,34 +441,34 @@ project-ascension/
 
 ### UX minimale
 
-- [ ] Lancement direct dans un monde, seed en argument (`cargo run -- --seed 42`), aléatoire par défaut.
-- [ ] Indication des contrôles et raccourcis à l'écran.
-- [ ] Barre de construction simple : générateur, câble, extracteur, broyeur, module(s), stockage.
-- [ ] Survol/sélection d'une machine : nom, énergie, inventaires, progression, modules.
-- [ ] Couleurs / icônes cohérentes pour `actif`, `hors tension`, `bloqué`, `invalide`.
-- [ ] Messages d'erreur utiles plutôt que des plantages silencieux.
-- [ ] Panneau des outils de test (accélération du temps, items gratuits) accessible par raccourci.
+- [x] Lancement direct dans un monde, seed en argument (`cargo dev -- --seed 42`), aléatoire par défaut ; `--demo` pour la scène standard.
+- [x] Indication des contrôles et raccourcis à l'écran (H : aide complète, rappel permanent en bas à gauche, bandeaux contextuels).
+- [x] Barre de construction simple → **menu de construction** (B) : extracteur, générateur, four, coffre, poteau, hub, convoyeur, modules.
+- [x] Survol/sélection d'une machine : aide sous le réticule + panneau (E) avec énergie, inventaires, progression, modules.
+- [x] Couleurs / icônes cohérentes pour `actif`, `hors tension`, `bloqué`, `invalide` (voyants vert/orange/rouge/gris, fantôme vert/rouge, ports bleu/jaune).
+- [x] Messages d'erreur utiles plutôt que des plantages silencieux (motifs de refus dans les bandeaux et panneaux).
+- [x] Outils de test accessibles par raccourci : T (temps), G (minerais), I/O (machine visée), F3 (overlay), listés dans l'aide (H).
 
 ### Qualité
 
-- [ ] Ajouter tests d'intégration du cycle complet de production.
-- [ ] Créer une scène test standard avec plusieurs machines.
-- [ ] Ajouter une seed de référence et tests de déterminisme.
-- [ ] Profiler séparément CPU simulation, génération, rendu, collisions et mémoire.
-- [ ] Mesurer les performances avant d'ajouter LOD avancé, threading complexe ou optimisations ECS.
-- [ ] Tester le comportement à faible FPS et pendant les pauses.
-- [ ] Tester monde vide, monde presque saturé, monde à nombreux câbles et machines.
-- [ ] Documenter les bugs connus et les contournements.
-- [ ] Préparer une build de démonstration et une courte procédure de reproduction.
+- [x] Ajouter tests d'intégration du cycle complet de production (extracteur → four → coffre ; scène de démo → hub).
+- [x] Créer une scène test standard avec plusieurs machines (`--demo`, `src/scene.rs`, testée sur 16 seeds).
+- [x] Ajouter une seed de référence et tests de déterminisme (relief, rochers, gisements).
+- [ ] Profiler séparément CPU simulation, génération, rendu, collisions et mémoire (simulation, génération, maillage et FPS mesurés ; collisions et mémoire non instrumentées).
+- [x] Mesurer les performances avant d'ajouter LOD avancé, threading complexe ou optimisations ECS (`docs/known-issues.md` : rien n'est nécessaire).
+- [x] Tester le comportement à faible FPS et pendant les pauses (ticks fixes, test d'indépendance au regroupement des ticks).
+- [x] Tester monde vide, monde à nombreux câbles et machines (test de charge 1 000 bâtiments : 38 µs/tick ; réseau en grille spatiale).
+- [x] Documenter les bugs connus et les contournements (`docs/known-issues.md`).
+- [x] Préparer une build de démonstration et une courte procédure de reproduction (README, section « Démo »).
 
 ### Critères d'acceptation V0
 
-- [ ] **Créer une partie** avec seed et voir un terrain lisse.
-- [ ] **Marcher / regarder / construire** sans passer par un outil externe.
-- [ ] **Trouver un gisement infini** et poser un extracteur.
-- [ ] **Produire de l'électricité** et alimenter des bâtiments.
-- [ ] **Transformer une ressource** puis la stocker automatiquement.
-- [ ] **Brancher/débrancher un module physique** avec effet mesurable.
+- [x] **Créer une partie** avec seed et voir un terrain lisse.
+- [x] **Marcher / regarder / construire** sans passer par un outil externe.
+- [x] **Trouver un gisement infini** et poser un extracteur.
+- [x] **Produire de l'électricité** et alimenter des bâtiments.
+- [x] **Transformer une ressource** puis la stocker automatiquement.
+- [x] **Brancher/débrancher un module physique** avec effet mesurable.
 - [ ] **S'éloigner** et revenir sans perte de simulation.
 - [ ] **Jouer plusieurs minutes sans crash** sur une machine de test.
 - [ ] **Avoir une boucle plaisante**, même avec seulement 2–3 bâtiments.
@@ -646,6 +646,9 @@ project-ascension/
 | 2026-11-15 | M2 (inventaire) | Inventaire joueur (Tab), panneau d'extracteur (E) avec « Tout prendre », état « menu » où la simulation continue, 73 tests | Valider les menus en jeu ; puis M3 (énergie) |
 | 2026-11-15 | M3 | Générateur, poteaux (10 m) et câbles, réseaux en graphe, satisfaction proportionnelle, four (minerai → plaque), barre 1–4, panneaux par machine avec marche/arrêt, 97 tests | Valider la chaîne générateur → poteau → extracteur / four en jeu ; puis M4 (modules) |
 | 2026-11-15 | M3 + M5 (partiel) | Chaîne M3 validée en jeu. Menu de construction (B), coffre, convoyeurs point à point avec objets visibles, glisser-déposer, 111 tests | Valider convoyeurs et glisser-déposer en jeu ; puis M4 (modules) et le hub |
+| 2026-11-15 | M4 | Convoyeurs et ports validés en jeu. Modules vitesse / efficacité sur le toit (2 emplacements), stats additives, retrait depuis le panneau ou au clic droit, 123 tests | Valider les modules en jeu ; puis le hub (M5) et M6 (hors champ) |
+| 2026-11-15 | M5 + M6 | Modules validés en jeu. Hub de livraison + 5 objectifs (suivi, notification), affichage des bâtiments déchargé au-delà de 170 m sans toucher à la simulation, 128 tests | S'éloigner puis revenir en jeu ; puis M7 (UX minimale, stabilisation) |
+| 2026-11-15 | M7 | Hub validé en jeu. Four : entrée et sortie opposées. Aide (H), scène de démo (`--demo`), outil G, coût du tick dans l'overlay, test de charge (1 000 bâtiments : 38 µs/tick), bugs connus, 133 tests | Valider : s'éloigner/revenir, plusieurs minutes sans crash, boucle plaisante ; puis V0.1 (sauvegardes + arbre techno) |
 
 ---
 

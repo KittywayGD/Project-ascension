@@ -1,0 +1,132 @@
+{
+  "src/app.rs": {
+    "mtime": 1794750407.1123643,
+    "ast_hash": "8d142191592e51a195e2e1bc6c5cd12e",
+    "semantic_hash": ""
+  },
+  "src/building/mod.rs": {
+    "mtime": 1794750407.1126602,
+    "ast_hash": "0dd6e038cf78f332a423f87b4b65d376",
+    "semantic_hash": ""
+  },
+  "src/building/placement.rs": {
+    "mtime": 1794750407.1128428,
+    "ast_hash": "b687aa161b87d0e3eb691c06dd6c81d0",
+    "semantic_hash": ""
+  },
+  "src/collision.rs": {
+    "mtime": 1794750407.1044552,
+    "ast_hash": "e45c463d034793c6e1486a2ef1bfb8de",
+    "semantic_hash": ""
+  },
+  "src/config.rs": {
+    "mtime": 1794750407.1049182,
+    "ast_hash": "7e111c7a9a8a17d7b7fc4bfd3999ee4d",
+    "semantic_hash": ""
+  },
+  "src/debug/mod.rs": {
+    "mtime": 1794750407.1132784,
+    "ast_hash": "b4f2746c87d3b0eb73754172ae2752c2",
+    "semantic_hash": ""
+  },
+  "src/interaction.rs": {
+    "mtime": 1794750407.1051197,
+    "ast_hash": "8865ea9fb9b36eda4e2fe199d474741d",
+    "semantic_hash": ""
+  },
+  "src/inventory.rs": {
+    "mtime": 1794750407.1117916,
+    "ast_hash": "9b7fa4ae95e6fdbedc79050a625feaf9",
+    "semantic_hash": ""
+  },
+  "src/main.rs": {
+    "mtime": 1794750407.112068,
+    "ast_hash": "56ea0f367a4e112c9831e3eb2673031c",
+    "semantic_hash": ""
+  },
+  "src/player/mod.rs": {
+    "mtime": 1794750407.113716,
+    "ast_hash": "cbdb4b4eb285e62b9062f1f16e2571b4",
+    "semantic_hash": ""
+  },
+  "src/scene.rs": {
+    "mtime": 1794750407.1033926,
+    "ast_hash": "9d3aaef25af3ca16290af0c91a142bb4",
+    "semantic_hash": ""
+  },
+  "src/simulation/clock.rs": {
+    "mtime": 1794750407.1063907,
+    "ast_hash": "1034ab0d2bcda99a11a2bc018d795ce4",
+    "semantic_hash": ""
+  },
+  "src/simulation/energy.rs": {
+    "mtime": 1794750407.1083384,
+    "ast_hash": "e82f4ba1eb388b9fc49788189f84d386",
+    "semantic_hash": ""
+  },
+  "src/simulation/hub.rs": {
+    "mtime": 1794750407.1057527,
+    "ast_hash": "c709ffdaf6206ae973b0216ca20041d4",
+    "semantic_hash": ""
+  },
+  "src/simulation/logistics.rs": {
+    "mtime": 1794750407.1069107,
+    "ast_hash": "f44922846fa4eeaeaf525cc5af5de791",
+    "semantic_hash": ""
+  },
+  "src/simulation/mod.rs": {
+    "mtime": 1794750407.1076162,
+    "ast_hash": "b1c27bf37feb13a04bbf90b29d3e56fb",
+    "semantic_hash": ""
+  },
+  "src/simulation/modules.rs": {
+    "mtime": 1794750407.108028,
+    "ast_hash": "bc420fe15e1a35786b809fa13e75c8da",
+    "semantic_hash": ""
+  },
+  "src/simulation/production.rs": {
+    "mtime": 1794750407.1074145,
+    "ast_hash": "9cba37b48d38c676fbe9ba0b817d3170",
+    "semantic_hash": ""
+  },
+  "src/simulation/sim_world.rs": {
+    "mtime": 1794750407.1059713,
+    "ast_hash": "548db8ee2fb5507eeb2e0b1e368e662a",
+    "semantic_hash": ""
+  },
+  "src/ui/mod.rs": {
+    "mtime": 1794750407.103762,
+    "ast_hash": "991c07bd4bd46bed33eddb191e93c3af",
+    "semantic_hash": ""
+  },
+  "src/world/deposits.rs": {
+    "mtime": 1794750407.1095986,
+    "ast_hash": "55f6837f0784c7abf1dfeee908195af6",
+    "semantic_hash": ""
+  },
+  "src/world/generation.rs": {
+    "mtime": 1794750407.1099753,
+    "ast_hash": "218977e35fdaa18229fbb096e2397337",
+    "semantic_hash": ""
+  },
+  "src/world/mod.rs": {
+    "mtime": 1794750407.111069,
+    "ast_hash": "d49cb3f6a9930e969bc9db7bd614bdc5",
+    "semantic_hash": ""
+  },
+  "src/world/noise.rs": {
+    "mtime": 1794750407.1114545,
+    "ast_hash": "528bd7c9e32b4946f108e579c92b96c9",
+    "semantic_hash": ""
+  },
+  "src/world/rocks.rs": {
+    "mtime": 1794750407.1106718,
+    "ast_hash": "8e670401bccf4ac156ad4eec180dd498",
+    "semantic_hash": ""
+  },
+  "src/world/terrain.rs": {
+    "mtime": 1794750407.108911,
+    "ast_hash": "8be17b64a9f94ff2729be0390d583bdc",
+    "semantic_hash": ""
+  }
+}

@@ -1,17 +1,19 @@
 //! Machines de production (extracteur, four), en Rust pur et en entiers.
 //!
 //! Règle (voir `docs/simulation.md`) : chaque tick, une machine reçoit une **alimentation**
-//! `p` en millièmes (1000 = pleine puissance, voir `energy.rs`) et avance de `p` fois
-//! sa vitesse nominale. Les accumulateurs sont entiers : aucune perte, aucune dérive.
+//! `p` en millièmes (1000 = pleine puissance, voir `energy.rs`) et avance de `p × v`, où
+//! `v` est sa vitesse en pourcentage (100 sans module, voir `modules.rs`). Les
+//! accumulateurs sont entiers : aucune perte, aucune dérive.
 //!
-//! - Extracteur au débit `r` unités/minute : l'accumulateur reçoit `r × p` par tick et une
-//!   unité sort à chaque `TICKS_PER_MINUTE × 1000`. À pleine puissance, après `n` ticks :
-//!   exactement `⌊n × r / 1200⌋` unités.
-//! - Four : une recette de `d` ticks reçoit `p` par tick et se termine à `d × 1000`.
+//! - Extracteur au débit `r` unités/minute : l'accumulateur reçoit `r × p × v` par tick et
+//!   une unité sort à chaque `TICKS_PER_MINUTE × 1000 × 100`. À pleine puissance et sans
+//!   module, après `n` ticks : exactement `⌊n × r / 1200⌋` unités.
+//! - Four : une recette de `d` ticks reçoit `p × v` par tick et se termine à `d × 1000 × 100`.
 
 use std::collections::VecDeque;
 
 use super::clock::TICK_RATE_HZ;
+use super::modules::MachineStats;
 use crate::inventory::{Inventory, ItemBuffer, ItemKind, MachineSlot};
 use crate::world::deposits::{DepositId, Purity, ResourceKind};
 
@@ -100,6 +102,8 @@ impl MachineState {
 pub struct Extractor {
     pub deposit: DepositId,
     pub enabled: bool,
+    /// Vitesse et consommation, recalculées à chaque ajout ou retrait de module.
+    pub stats: MachineStats,
     rate_per_min: u32,
     /// Accumulateur en « unités × ticks / minute × millièmes ».
     progress: u64,
@@ -116,6 +120,7 @@ impl Extractor {
         Self {
             deposit,
             enabled: true,
+            stats: MachineStats::BASE,
             rate_per_min: extractor_rate_per_min(purity),
             progress: 0,
             output: ItemBuffer::new(ItemKind::ore_of(kind), EXTRACTOR_OUTPUT_CAPACITY),
@@ -126,8 +131,19 @@ impl Extractor {
         }
     }
 
+    /// Débit nominal (pureté seule, sans module).
     pub fn rate_per_min(&self) -> u32 {
         self.rate_per_min
+    }
+
+    /// Débit théorique avec les modules, à pleine puissance.
+    pub fn effective_rate_per_min(&self) -> f32 {
+        self.rate_per_min as f32 * self.stats.speed_percent as f32 / 100.0
+    }
+
+    /// Puissance demandée quand il travaille, modules compris.
+    pub fn power_demand_w(&self) -> u64 {
+        self.stats.scale_power(EXTRACTOR_POWER_W)
     }
 
     pub fn output(&self) -> &ItemBuffer {
@@ -147,7 +163,7 @@ impl Extractor {
     }
 
     fn threshold() -> u64 {
-        u64::from(TICKS_PER_MINUTE) * u64::from(FULL_POWER)
+        u64::from(TICKS_PER_MINUTE) * u64::from(FULL_POWER) * 100
     }
 
     /// Avancement vers la prochaine unité, entre 0 et 1.
@@ -180,7 +196,9 @@ impl Extractor {
             return;
         }
 
-        self.progress += u64::from(self.rate_per_min) * u64::from(power.min(FULL_POWER));
+        self.progress += u64::from(self.rate_per_min)
+            * u64::from(power.min(FULL_POWER))
+            * u64::from(self.stats.speed_percent);
         while self.progress >= Self::threshold() {
             if self.output.add(1) == 0 {
                 // Plein en cours de tick : on garde la progression pour plus tard.
@@ -208,10 +226,12 @@ impl Extractor {
 #[derive(Debug, Clone)]
 pub struct Furnace {
     pub enabled: bool,
+    /// Vitesse et consommation, recalculées à chaque ajout ou retrait de module.
+    pub stats: MachineStats,
     input: MachineSlot,
     output: MachineSlot,
-    /// Avancement de la fabrication en cours, en « ticks × millièmes ».
-    progress: u32,
+    /// Avancement de la fabrication en cours, en « ticks × millièmes × pourcents ».
+    progress: u64,
     state: MachineState,
     crafted_total: u64,
 }
@@ -220,6 +240,7 @@ impl Default for Furnace {
     fn default() -> Self {
         Self {
             enabled: true,
+            stats: MachineStats::BASE,
             input: MachineSlot::new(FURNACE_SLOT_CAPACITY),
             output: MachineSlot::new(FURNACE_SLOT_CAPACITY),
             progress: 0,
@@ -260,11 +281,25 @@ impl Furnace {
         self.input.kind().and_then(furnace_recipe)
     }
 
+    /// Seuil de fin d'une recette pour l'accumulateur.
+    fn threshold(recipe: &Recipe) -> u64 {
+        u64::from(recipe.duration_ticks) * u64::from(FULL_POWER) * 100
+    }
+
     /// Avancement de la fabrication en cours, entre 0 et 1.
     pub fn progress_fraction(&self) -> f32 {
-        self.recipe().map_or(0.0, |r| {
-            self.progress as f32 / (r.duration_ticks * FULL_POWER) as f32
-        })
+        self.recipe()
+            .map_or(0.0, |r| self.progress as f32 / Self::threshold(r) as f32)
+    }
+
+    /// Puissance demandée quand il travaille, modules compris.
+    pub fn power_demand_w(&self) -> u64 {
+        self.stats.scale_power(FURNACE_POWER_W)
+    }
+
+    /// Durée d'une fabrication à pleine puissance, modules compris, en secondes.
+    pub fn craft_seconds(&self, recipe: &Recipe) -> f32 {
+        recipe.duration_ticks as f32 / TICK_RATE_HZ as f32 * 100.0 / self.stats.speed_percent as f32
     }
 
     /// Le four accepte ce minerai s'il a une recette, que l'entrée est vide ou du même
@@ -341,13 +376,13 @@ impl Furnace {
             return;
         }
 
-        self.progress += power.min(FULL_POWER);
-        if self.progress >= recipe.duration_ticks * FULL_POWER {
+        self.progress += u64::from(power.min(FULL_POWER)) * u64::from(self.stats.speed_percent);
+        if self.progress >= Self::threshold(recipe) {
             // Une seule consommation par fabrication, au moment où elle se termine.
             let consumed = self.input.take(1);
             let produced = self.output.insert(recipe.output, consumed);
             debug_assert_eq!((consumed, produced), (1, 1), "conservation au four");
-            self.progress -= recipe.duration_ticks * FULL_POWER;
+            self.progress -= Self::threshold(recipe);
             self.crafted_total += u64::from(produced);
         }
     }
@@ -411,6 +446,28 @@ mod tests {
         assert_eq!(e.state(), MachineState::Off);
         assert!(!e.wants_power());
         assert_eq!((e.produced_total(), e.progress), (0, progress));
+    }
+
+    #[test]
+    fn speed_modules_raise_the_rate_and_the_demand() {
+        let mut e = extractor(Purity::Normal);
+        e.stats = MachineStats {
+            speed_percent: 150,
+            power_percent: 160,
+        };
+        run(&mut e, 0, u64::from(TICKS_PER_MINUTE));
+        assert_eq!(e.produced_total(), 45);
+        assert_eq!(e.power_demand_w(), 48_000);
+        assert_eq!(e.effective_rate_per_min(), 45.0);
+    }
+
+    #[test]
+    fn furnace_speed_shortens_the_recipe() {
+        let mut f = furnace_with(ItemKind::IronOre, 10);
+        f.stats.speed_percent = 200; // 1 s par plaque
+        run_furnace(&mut f, 20, FULL_POWER);
+        assert_eq!(f.output().count(), 1);
+        assert_eq!(f.craft_seconds(&FURNACE_RECIPES[0]), 1.0);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 Sandbox industriel 3D en Rust ([Bevy](https://bevy.org) 0.20) : exploration, construction et automatisation sur une carte procédurale.
 
-> **Statut :** préprototype — **M3** terminé, **M5** bien avancé (convoyeurs, coffre, glisser-déposer, menu de construction).
+> **Statut :** **V0 jouable** (M0 à M7) : terrain, gisements, énergie, modules, convoyeurs, hub et objectifs, simulation hors champ, aide et scène de démo. Prochaine étape : V0.1 (sauvegardes + arbre techno).
 > Feuille de route complète : [`TODO.md`](TODO.md).
 
 ## Installation
@@ -23,12 +23,33 @@ Sandbox industriel 3D en Rust ([Bevy](https://bevy.org) 0.20) : exploration, con
 
 Sur Linux, Bevy demande aussi quelques bibliothèques système (`libasound2-dev`, `libudev-dev`, `libwayland-dev`, `libxkbcommon-dev`).
 
+## Démo
+
+Une usine complète et automatique, en deux secondes :
+
+```bash
+cargo dev -- --seed 42 --demo
+```
+
+La scène pose, près du point d'apparition : extracteur sur le gisement de départ → convoyeur → four → convoyeur → hub, alimentés par deux générateurs via un poteau, avec des modules de vitesse et d'efficacité. Pour la voir tourner :
+
+1. Clique pour jouer, puis repère les bâtiments (l'overlay F3 indique le gisement de départ).
+2. **T** accélère le temps (×10, ×100) : l'objectif en haut à droite avance jusqu'à la notification « 50 plaques de fer livrées ».
+3. **E** sur une machine ouvre son panneau : états, débits, modules, réseau.
+4. Éloigne-toi à plus de 170 m (**V** pour voler) : l'overlay montre l'affichage déchargé, et la production continue. Reviens : tout réapparaît.
+5. **H** affiche toutes les commandes.
+
+Build optimisée à partager : `cargo build --release`, puis `./target/release/project-ascension --demo`.
+Limites connues : [`docs/known-issues.md`](docs/known-issues.md).
+
 ## Commandes
 
 | Commande | Rôle |
 |---|---|
 | `cargo dev` | Lance le jeu en développement (liaison dynamique de Bevy, recompilation rapide), sur une seed aléatoire |
 | `cargo dev -- --seed 42` | Lance le jeu sur une seed précise (même seed → même monde) |
+| `cargo dev -- --demo` | Lance le jeu avec la scène de démonstration |
+| `cargo test --features dev stress -- --ignored --nocapture` | Test de charge (1 000 bâtiments) |
 | `cargo run --release` | Lance une build optimisée (plus longue à compiler) |
 | `cargo test` | Tests unitaires (génération, déterminisme, simulation, déplacement) |
 | `cargo fmt --check` | Vérifie le formatage |
@@ -52,10 +73,12 @@ Les touches sont **physiques** : sur un clavier AZERTY, W/A/S/D correspondent au
 | Clic gauche (en jeu) | Détruire le rocher visé (surligné, portée 12 m) |
 | Tab | Inventaire (glisser-déposer les cases pour les déplacer) |
 | E (en visant un bâtiment) | Ouvrir son panneau : état, réseau, entrée/sortie, marche/arrêt |
-| B | Menu de construction : choisir un bâtiment ou le convoyeur |
-| Clic gauche / droit (construction) | Poser / démonter (ou annuler un convoyeur en cours) |
+| B | Menu de construction : bâtiment, convoyeur ou module |
+| Clic gauche / droit (construction) | Poser / démonter (ou annuler un convoyeur en cours, retirer un module visé) |
 | R (construction) | Tourner de 90° |
 | Échap (construction) | Arrêter de construire |
+| H | Aide : toutes les commandes, légende des voyants |
+| G | +50 minerais de fer et de cuivre (outil de test) |
 | F3 | Afficher / masquer l'overlay debug |
 | T | Vitesse du temps ×1 / ×10 / ×100 (outil de test) |
 | I / O | Remplir la machine visée (+10) / vider sa sortie (outil de test) |
@@ -82,6 +105,6 @@ src/
 ├── collision.rs     # obstacles cercle / rectangle, sans moteur physique
 ├── inventory.rs     # objets, piles, inventaire, transferts (Rust pur)
 ├── ui/              # menus : inventaire et panneaux de machine, aide sous le réticule
-├── simulation/      # SimWorld à pas fixe : machines, four, réseau électrique (Rust pur)
+├── simulation/      # SimWorld à pas fixe : machines, modules, convoyeurs, réseau électrique (Rust pur)
 └── debug/           # overlay F3 et bandeau de pause
 ```

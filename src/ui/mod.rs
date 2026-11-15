@@ -20,8 +20,9 @@ use crate::inventory::{Inventory, ItemKind, move_between, take_from_slot, transf
 use crate::player::{INVENTORY_SLOTS, PlayerInventory};
 use crate::simulation::Simulation;
 use crate::simulation::energy::{GENERATOR_POWER_W, POLE_RANGE_M};
+use crate::simulation::hub::GOALS;
 use crate::simulation::logistics::conveyor_max_rate_per_min;
-use crate::simulation::production::FURNACE_POWER_W;
+use crate::simulation::modules::{MachineStats, Module};
 use crate::simulation::sim_world::{BuildingId, BuildingKind, Machine, STORAGE_SLOTS, SimWorld};
 use crate::world::Deposits;
 
@@ -102,6 +103,8 @@ enum Action {
     Toggle,
     Select(BuildTool),
     StopBuilding,
+    RemoveModule(BuildingId),
+    DeliverAll,
 }
 
 #[derive(Component)]
@@ -109,6 +112,30 @@ struct PanelButton(Action);
 
 #[derive(Component)]
 struct ToggleLabel;
+
+/// Ligne « Modules » du panneau de machine.
+#[derive(Component)]
+struct ModulesInfo;
+
+/// Suivi d'objectif, en haut à droite.
+#[derive(Component)]
+struct GoalTracker;
+
+/// Panneau d'aide (H) : contrôles, légende des couleurs, outils de test.
+#[derive(Component)]
+struct HelpPanel;
+
+/// Notification temporaire (objectif atteint).
+#[derive(Component)]
+struct Toast;
+
+/// Fin d'affichage de la notification, en secondes depuis le lancement.
+#[derive(Resource, Debug, Default)]
+struct ToastUntil(f32);
+
+/// Demande de reconstruction du menu ouvert (après un retrait de module).
+#[derive(Resource, Debug, Default)]
+struct RebuildMenu(bool);
 
 /// Carte du menu de construction (fond différent des boutons).
 #[derive(Component)]
@@ -124,11 +151,21 @@ impl Plugin for MenuPlugin {
         app.init_resource::<OpenMenu>()
             .init_resource::<PanelMessage>()
             .init_resource::<Dragging>()
-            .add_systems(Startup, spawn_prompt)
+            .init_resource::<RebuildMenu>()
+            .init_resource::<ToastUntil>()
+            .add_systems(Startup, (spawn_prompt, spawn_goal_hud, spawn_help))
+            .add_systems(Update, (update_goal_hud, toggle_help))
             .add_systems(Update, open_menu.run_if(in_state(PlayState::Running)))
             .add_systems(
                 Update,
-                (close_menu, update_menu, style_buttons, follow_cursor)
+                (
+                    close_menu,
+                    rebuild_menu,
+                    update_menu,
+                    style_buttons,
+                    follow_cursor,
+                )
+                    .chain()
                     .run_if(in_state(PlayState::Menu)),
             )
             .add_systems(Update, update_prompt)
@@ -149,9 +186,12 @@ fn open_menu(
     } else if keys.just_pressed(KeyCode::KeyB) {
         Some(OpenMenu::Build)
     } else if keys.just_pressed(KeyCode::KeyE) {
-        target
-            .0
-            .building()
+        // Viser un module ouvre la machine qui le porte.
+        let machine = match target.0 {
+            Aim::Module { id, .. } => sim.world.module(id).map(|m| m.host),
+            aim => aim.building(),
+        };
+        machine
             .filter(|id| sim.world.building(*id).is_some())
             .map(OpenMenu::Machine)
     } else {
@@ -296,10 +336,35 @@ fn spawn_menu(
     sim: Res<Simulation>,
     build: Res<BuildMode>,
 ) {
-    let menu = *menu;
+    spawn_menu_ui(&mut commands, *menu, &sim, &build);
+}
+
+/// Reconstruit le menu ouvert (la liste des modules a changé).
+fn rebuild_menu(
+    mut rebuild: ResMut<RebuildMenu>,
+    roots: Query<Entity, With<MenuRoot>>,
+    mut commands: Commands,
+    menu: Res<OpenMenu>,
+    sim: Res<Simulation>,
+    build: Res<BuildMode>,
+) {
+    if !std::mem::take(&mut rebuild.0) {
+        return;
+    }
+    for root in &roots {
+        commands.entity(root).despawn();
+    }
+    spawn_menu_ui(&mut commands, *menu, &sim, &build);
+}
+
+fn spawn_menu_ui(commands: &mut Commands, menu: OpenMenu, sim: &Simulation, build: &BuildMode) {
     let kind = match menu {
         OpenMenu::Machine(id) => sim.world.building(id).map(|b| b.machine.kind()),
         _ => None,
+    };
+    let modules = match menu {
+        OpenMenu::Machine(id) => sim.world.modules_of(id),
+        _ => Vec::new(),
     };
     commands
         .spawn((
@@ -328,11 +393,11 @@ fn spawn_menu(
             ))
             .with_children(|panel| {
                 if menu == OpenMenu::Build {
-                    spawn_build_menu(panel, &build);
+                    spawn_build_menu(panel, build);
                     return;
                 }
                 if let Some(kind) = kind {
-                    spawn_machine_section(panel, kind);
+                    spawn_machine_section(panel, kind, &modules);
                 }
                 panel.spawn((InventoryTitle, text("Inventaire", 18.0, Color::WHITE)));
                 slot_grid(panel, (0..INVENTORY_SLOTS).map(SlotRef::Inventory));
@@ -427,8 +492,24 @@ fn spawn_build_menu(panel: &mut ChildSpawnerCommands, build: &BuildMode) {
     });
 }
 
-fn spawn_machine_section(panel: &mut ChildSpawnerCommands, kind: BuildingKind) {
+fn spawn_machine_section(
+    panel: &mut ChildSpawnerCommands,
+    kind: BuildingKind,
+    modules: &[(BuildingId, Module)],
+) {
     panel.spawn((MachineInfo, text("", 16.0, Color::WHITE)));
+    if kind.module_slots() > 0 {
+        panel.spawn(row()).with_children(|r| {
+            r.spawn((ModulesInfo, text("", 15.0, ACCENT)));
+            for (id, module) in modules {
+                spawn_button(
+                    r,
+                    Action::RemoveModule(*id),
+                    &format!("Retirer {}", module.kind.short_name()),
+                );
+            }
+        });
+    }
     match kind {
         BuildingKind::Extractor => {
             progress_bar(panel, Val::Percent(100.0));
@@ -465,6 +546,11 @@ fn spawn_machine_section(panel: &mut ChildSpawnerCommands, kind: BuildingKind) {
                 spawn_button(r, Action::Toggle, "Éteindre");
             });
         }
+        BuildingKind::Hub => {
+            panel.spawn(row()).with_children(|r| {
+                spawn_button(r, Action::DeliverAll, "Livrer tout l'inventaire");
+            });
+        }
         BuildingKind::Pole => {}
     }
     // Espace avant l'inventaire.
@@ -483,6 +569,7 @@ fn on_button(
     mut sim: ResMut<Simulation>,
     mut inventory: ResMut<PlayerInventory>,
     mut message: ResMut<PanelMessage>,
+    mut rebuild: ResMut<RebuildMenu>,
     mut next: ResMut<NextState<PlayState>>,
 ) {
     let Ok(PanelButton(action)) = buttons.get(activate.entity) else {
@@ -498,6 +585,43 @@ fn on_button(
         Action::StopBuilding => {
             build.stop();
             next.set(PlayState::Running);
+            return;
+        }
+        Action::DeliverAll => {
+            let OpenMenu::Machine(hub) = *menu else {
+                return;
+            };
+            let mut delivered = 0;
+            for kind in ItemKind::ALL {
+                let count = inventory.0.count(kind);
+                if count == 0 {
+                    continue;
+                }
+                // D'abord retirer de l'inventaire, puis compter : rien n'est dupliqué.
+                let removed = inventory.0.remove(kind, count);
+                if sim.world.deliver_by_hand(hub, kind, u64::from(removed)) {
+                    delivered += removed;
+                } else {
+                    inventory.0.add(kind, removed);
+                }
+            }
+            message.0 = if delivered == 0 {
+                "Rien à livrer : l'inventaire est vide.".to_string()
+            } else {
+                format!("{delivered} objet(s) livré(s) au hub.")
+            };
+            info!("{}", message.0);
+            return;
+        }
+        Action::RemoveModule(id) => {
+            if let Some(module) = sim.world.detach_module(id) {
+                message.0 = format!(
+                    "{} retiré : il disparaît du toit (contenu de la machine conservé).",
+                    module.kind.name()
+                );
+                info!("{}", message.0);
+            }
+            rebuild.0 = true;
             return;
         }
         _ => {}
@@ -722,6 +846,126 @@ fn power_line(world: &SimWorld, id: BuildingId, consumer: bool) -> String {
     )
 }
 
+/// Ligne d'objectif : « Objectif 2/5 : 23/50 plaques de cuivre ».
+fn goal_line(world: &SimWorld) -> String {
+    let deliveries = world.deliveries();
+    match deliveries.current_goal() {
+        Some((index, goal)) => format!(
+            "Objectif {}/{} : livrer {} ({}/{})",
+            index + 1,
+            GOALS.len(),
+            goal.kind.quantity(goal.amount as u32),
+            deliveries.total(goal.kind).min(goal.amount),
+            goal.amount
+        ),
+        None => format!(
+            "Tous les objectifs sont atteints ({}/{}) !",
+            GOALS.len(),
+            GOALS.len()
+        ),
+    }
+}
+
+/// Suivi d'objectif en haut à droite et notification temporaire au centre.
+fn spawn_goal_hud(mut commands: Commands) {
+    commands.spawn((
+        GoalTracker,
+        text("", 15.0, Color::WHITE),
+        TextShadow::default(),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(10.0),
+            right: Val::Px(12.0),
+            ..default()
+        },
+        Pickable::IGNORE,
+    ));
+    commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                position_type: PositionType::Absolute,
+                top: Val::Px(90.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .with_child((
+            Toast,
+            text("", 22.0, ACCENT),
+            TextShadow::default(),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+            Node {
+                padding: UiRect::axes(Val::Px(18.0), Val::Px(10.0)),
+                border_radius: BorderRadius::all(Val::Px(8.0)),
+                ..default()
+            },
+            Visibility::Hidden,
+            Pickable::IGNORE,
+        ));
+}
+
+fn update_goal_hud(
+    sim: Res<Simulation>,
+    time: Res<Time>,
+    mut last_reached: Local<usize>,
+    mut until: ResMut<ToastUntil>,
+    mut tracker: Single<&mut Text, (With<GoalTracker>, Without<Toast>)>,
+    toast: Single<(&mut Text, &mut Visibility), (With<Toast>, Without<GoalTracker>)>,
+) {
+    let wanted = goal_line(&sim.world);
+    if tracker.0 != wanted {
+        tracker.0 = wanted;
+    }
+
+    let (mut toast_text, mut visibility) = toast.into_inner();
+    let reached = sim.world.deliveries().goals_reached();
+    if reached > *last_reached {
+        let goal = GOALS[reached - 1];
+        toast_text.0 = format!(
+            "Objectif atteint : {} livrées !",
+            goal.kind.quantity(goal.amount as u32)
+        );
+        info!("{}", toast_text.0);
+        until.0 = time.elapsed_secs() + 5.0;
+        *last_reached = reached;
+    }
+    let show = time.elapsed_secs() < until.0;
+    let wanted = if show {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    if *visibility != wanted {
+        *visibility = wanted;
+    }
+}
+
+/// Ligne « Modules » : liste et statistiques résultantes de la machine.
+fn modules_line(world: &SimWorld, id: BuildingId, machine: &Machine) -> String {
+    let slots = machine.kind().module_slots();
+    let modules = world.modules_of(id);
+    let names: Vec<&str> = modules.iter().map(|(_, m)| m.kind.short_name()).collect();
+    let stats = world.stats_of(id);
+    let demand = match machine {
+        Machine::Extractor(e) => e.power_demand_w(),
+        Machine::Furnace(f) => f.power_demand_w(),
+        _ => 0,
+    };
+    if stats == MachineStats::BASE && modules.is_empty() {
+        return format!("Modules (0/{slots}) : aucun — fixe-en depuis le menu de construction (B)");
+    }
+    format!(
+        "Modules ({}/{slots}) : {} · vitesse {} % · consommation {} % ({} kW en marche)",
+        modules.len(),
+        names.join(", "),
+        stats.speed_percent,
+        stats.power_percent,
+        demand / 1000
+    )
+}
+
 /// Ligne décrivant les convoyeurs branchés sur un bâtiment.
 fn belts_line(world: &SimWorld, id: BuildingId) -> String {
     let incoming = world.conveyors().filter(|(_, c)| c.to == id).count();
@@ -748,11 +992,12 @@ fn machine_info(world: &SimWorld, deposits: &Deposits, id: BuildingId) -> String
             let deposit = deposits.0.get(e.deposit);
             format!(
                 "Extracteur #{} — gisement de {} {}\n\
-                 État : {} · {}/min théorique · {:.1}/min réel · {} produits\n{}{belts}",
+                 État : {} · {:.1}/min théorique (nominal {}) · {:.1}/min réel · {} produits\n{}{belts}",
                 id.0,
                 deposit.map_or("?", |d| d.kind.name()),
                 deposit.map_or("?", |d| d.purity.name()),
                 e.state().name(),
+                e.effective_rate_per_min(),
                 e.rate_per_min(),
                 e.measured_rate_per_min(now),
                 e.produced_total(),
@@ -763,12 +1008,15 @@ fn machine_info(world: &SimWorld, deposits: &Deposits, id: BuildingId) -> String
             let recipe = f.recipe().map_or_else(
                 || "aucune recette : dépose du minerai".to_string(),
                 |r| {
+                    // Énergie par plaque : puissance demandée × durée réelle (vitesse comprise).
+                    let energy_kj = r.energy_j(f.power_demand_w()) * 100
+                        / u64::from(f.stats.speed_percent)
+                        / 1000;
                     format!(
-                        "{} → {} ({} s, {} kJ)",
+                        "{} → {} ({:.2} s, {energy_kj} kJ)",
                         r.input.name(),
                         r.output.name(),
-                        r.duration_ticks / 20,
-                        r.energy_j(FURNACE_POWER_W) / 1000
+                        f.craft_seconds(r)
                     )
                 },
             );
@@ -787,6 +1035,26 @@ fn machine_info(world: &SimWorld, deposits: &Deposits, id: BuildingId) -> String
                 "Coffre #{} — {total} objet(s) · {used}/{STORAGE_SLOTS} cases occupées\n\
                  Entrée à l'arrière (bloc bleu), sortie à l'avant (bloc jaune){belts}",
                 id.0
+            )
+        }
+        Machine::Hub => {
+            let deliveries = world.deliveries();
+            let totals: Vec<String> = ItemKind::ALL
+                .into_iter()
+                .filter(|k| deliveries.total(*k) > 0)
+                .map(|k| k.quantity(deliveries.total(k) as u32))
+                .collect();
+            format!(
+                "Hub de livraison #{} — tous hubs confondus : {} objet(s) livré(s), {}/min\n{}\nTotaux : {}{belts}",
+                id.0,
+                deliveries.grand_total(),
+                deliveries.per_minute(now),
+                goal_line(world),
+                if totals.is_empty() {
+                    "rien pour l'instant".to_string()
+                } else {
+                    totals.join(" · ")
+                }
             )
         }
         Machine::Generator(g) => format!(
@@ -845,6 +1113,7 @@ fn update_menu(
         Has<MessageText>,
         Has<InventoryTitle>,
         Has<ToggleLabel>,
+        Has<ModulesInfo>,
     )>,
     mut fill: Query<&mut Node, With<ProgressFill>>,
     mut next: ResMut<NextState<PlayState>>,
@@ -878,7 +1147,7 @@ fn update_menu(
         }
     }
 
-    for (mut text, slot, is_info, is_message, is_title, is_toggle) in &mut texts {
+    for (mut text, slot, is_info, is_message, is_title, is_toggle, is_modules) in &mut texts {
         let wanted = if let Some(SlotText(slot)) = slot {
             content(*slot).map_or_else(String::new, |(kind, count)| {
                 format!("{}\n{count}", kind.symbol())
@@ -904,6 +1173,8 @@ fn update_menu(
         } else if is_toggle {
             let on = machine.is_some_and(|(_, m)| m.enabled());
             (if on { "Éteindre" } else { "Allumer" }).to_string()
+        } else if is_modules {
+            machine.map_or_else(String::new, |(id, m)| modules_line(&sim.world, id, m))
         } else {
             continue;
         };
@@ -1013,6 +1284,19 @@ fn update_prompt(
                 None => String::new(),
             }
         }
+        (PlayState::Running, Aim::Module { id, .. }) => match sim.world.module(id) {
+            Some(m) => format!(
+                "{} sur #{} · E : ouvrir la machine{}",
+                m.kind.name(),
+                m.host.0,
+                if build.active {
+                    " · Clic droit : retirer"
+                } else {
+                    ""
+                }
+            ),
+            None => String::new(),
+        },
         (PlayState::Running, Aim::Conveyor { id, .. }) => match sim.world.conveyor(id) {
             Some(c) => format!(
                 "Convoyeur #{} · {} objet(s) en route · {} livrés{}",
@@ -1034,5 +1318,81 @@ fn update_prompt(
     };
     if prompt.0 != wanted {
         prompt.0 = wanted;
+    }
+}
+
+const HELP_TEXT: &str = "\
+CONTRÔLES
+Z Q S D : se déplacer · Souris : regarder · Maj : courir
+Espace : sauter (marche) / monter (vol) · Ctrl : descendre (vol)
+V : marche / vol · Échap : pause (ou arrêter de construire) · Maj + Échap : quitter
+
+CONSTRUIRE
+B : menu de construction · Clic gauche : poser · Clic droit : démonter
+R : tourner · Convoyeur : sortie jaune, puis entrée bleue
+Modules : vise une machine, ils se posent sur le toit
+
+INTERAGIR
+E : ouvrir la machine visée · Tab : inventaire (glisser-déposer)
+Clic gauche hors construction : détruire un rocher
+
+VOYANTS
+Vert : actif · Orange : en attente ou sortie pleine
+Rouge : sans énergie · Gris : éteint
+Fantôme vert : pose possible · rouge : impossible (motif en bas)
+
+OUTILS DE TEST
+T : vitesse du temps ×1 / ×10 / ×100 · G : +50 minerais de fer et de cuivre
+I / O : remplir / vider la machine visée · F3 : overlay debug
+
+H : fermer l'aide";
+
+/// Panneau d'aide (masqué) et rappel « H : aide » en bas à gauche.
+fn spawn_help(mut commands: Commands) {
+    commands.spawn((
+        text("H : aide", 14.0, MUTED),
+        TextShadow::default(),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(10.0),
+            left: Val::Px(12.0),
+            ..default()
+        },
+        Pickable::IGNORE,
+    ));
+    commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                position_type: PositionType::Absolute,
+                justify_content: JustifyContent::FlexEnd,
+                align_items: AlignItems::Center,
+                padding: UiRect::right(Val::Px(16.0)),
+                ..default()
+            },
+            Pickable::IGNORE,
+            GlobalZIndex(15),
+        ))
+        .with_child((
+            HelpPanel,
+            text(HELP_TEXT, 14.0, Color::WHITE),
+            BackgroundColor(PANEL_BG),
+            Node {
+                padding: UiRect::all(Val::Px(16.0)),
+                border_radius: BorderRadius::all(Val::Px(10.0)),
+                ..default()
+            },
+            Visibility::Hidden,
+            Pickable::IGNORE,
+        ));
+}
+
+fn toggle_help(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut help: Single<&mut Visibility, With<HelpPanel>>,
+) {
+    if keys.just_pressed(KeyCode::KeyH) {
+        help.toggle_visible_hidden();
     }
 }

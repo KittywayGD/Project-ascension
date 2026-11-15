@@ -6,9 +6,13 @@
 
 pub mod clock;
 pub mod energy;
+pub mod hub;
 pub mod logistics;
+pub mod modules;
 pub mod production;
 pub mod sim_world;
+
+use std::time::Instant;
 
 use bevy::prelude::*;
 
@@ -24,6 +28,8 @@ pub struct Simulation {
     pub world: SimWorld,
     /// Ticks de simulation exécutés par tick fixe (1 = temps réel).
     pub speed: u32,
+    /// Coût moyen d'un tick de simulation, en microsecondes (moyenne glissante).
+    pub tick_cost_us: f32,
 }
 
 impl Default for Simulation {
@@ -31,6 +37,7 @@ impl Default for Simulation {
         Self {
             world: SimWorld::default(),
             speed: 1,
+            tick_cost_us: 0.0,
         }
     }
 }
@@ -55,7 +62,15 @@ impl Plugin for SimulationPlugin {
 }
 
 fn step(mut sim: ResMut<Simulation>) {
+    let start = Instant::now();
     for _ in 0..sim.speed {
         sim.world.step();
     }
+    // Mesure du coût CPU d'un tick (M7 : profiler la simulation à part du rendu).
+    let per_tick = start.elapsed().as_secs_f32() * 1e6 / sim.speed as f32;
+    sim.tick_cost_us = if sim.tick_cost_us == 0.0 {
+        per_tick
+    } else {
+        sim.tick_cost_us * 0.95 + per_tick * 0.05
+    };
 }

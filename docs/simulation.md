@@ -1,6 +1,6 @@
 # Simulation
 
-> État : **M3 + M5 partiel** — horloge à pas fixe, extracteurs, four, coffre, réseau électrique et convoyeurs.
+> État : **M6** — horloge à pas fixe, extracteurs, four, coffre, hub, modules, réseau électrique, convoyeurs et simulation hors champ.
 
 ## Démarrer une usine
 
@@ -12,10 +12,42 @@
 
 Les bâtiments se choisissent dans le **menu de construction** (B).
 
+## Hub de livraison et objectifs (`src/simulation/hub.rs`)
+
+- Le **hub** accepte tout objet, par convoyeur (entrée à l'arrière) ou à la main (« Livrer tout l'inventaire » dans son panneau). L'objet est **consommé** : il quitte le jeu et est compté.
+- Les livraisons de tous les hubs s'additionnent et font avancer **5 objectifs successifs** : 50 plaques de fer, 50 plaques de cuivre, 300 plaques de fer, 200 plaques de cuivre, 1 000 plaques de fer. Ce qui a été livré d'avance compte dès que l'objectif devient le courant.
+- L'objectif en cours est affiché en haut à droite, et une notification apparaît quand il est atteint. Il préfigure l'arbre technologique de la V0.1.
+- Le hub n'a pas besoin d'énergie. Son voyant est vert quand un convoyeur lui apporte quelque chose.
+
+## Simulation hors champ (M6)
+
+- `SimWorld` contient **tout** l'état de jeu ; l'affichage en est une projection.
+- L'affichage d'un bâtiment est **chargé** quand le joueur passe à moins de 150 m, et **déchargé** au-delà de 170 m (l'écart évite les clignotements à la limite). Ses modules, ses convoyeurs et ses câbles suivent.
+- La simulation ne sait pas où est le joueur : une usine déchargée produit exactement comme si on la regardait. Au retour, l'affichage est recréé depuis l'état de simulation : rien n'est dupliqué ni remis à zéro.
+- Le terrain (512 m) reste entièrement affiché : rien ne justifie encore de le découper par distance.
+- Jeu fermé : aucune production hors ligne. Il n'y a pas encore de sauvegarde (V0.1).
+
+## Modules (`src/simulation/modules.rs`)
+
+- **Noyau** : l'extracteur et le four ont chacun **2 emplacements** sur le toit. Le générateur, le poteau et le coffre n'en ont pas.
+- **Pose** : choisis un module dans le menu de construction, puis vise une machine. Le fantôme se place sur l'emplacement libre le plus proche du point visé ; clic gauche pour le fixer.
+- **Retrait** : clic droit sur le module en mode construction, ou bouton « Retirer » dans le panneau de la machine (E). Le contenu de la machine n'est pas touché. Démonter la machine retire ses modules.
+- **Effets** (bonus **additifs**) :
+
+  | Module | Vitesse | Consommation |
+  |---|---|---|
+  | Vitesse | +50 % | +60 % |
+  | Efficacité | — | −30 % |
+
+  Exemples : 2 modules de vitesse donnent ×2 en vitesse et 220 % de consommation ; vitesse + efficacité donnent ×1,5 en vitesse et 130 % de consommation. La vitesse ne descend jamais sous 100 %, ni la consommation sous 20 %.
+- **Calcul** : la vitesse `v` (%) multiplie l'avancement à chaque tick (`r × p × v` pour l'extracteur, `p × v` pour le four), toujours en entiers. La puissance demandée vaut `nominale × consommation / 100`. Les stats sont recalculées immédiatement à chaque pose ou retrait.
+- Un extracteur normal avec un module de vitesse produit 45/min pour 48 kW. Un four à ×2 sort une plaque par seconde.
+- La pastille d'un module s'allume quand sa machine travaille.
+
 ## Convoyeurs (`src/simulation/logistics.rs`)
 
 - **Point à point** : on clique la sortie d'un bâtiment (bloc jaune), puis l'entrée d'un autre (bloc bleu). Le tapis est droit, mesure de 0,5 à 40 m, et ne doit pas passer sous le terrain.
-- **Ports** : l'extracteur n'a qu'une sortie (à l'avant). Le four a son entrée à l'arrière et sa sortie à droite. Le coffre a son entrée à l'arrière et sa sortie à l'avant. Un seul convoyeur par port.
+- **Ports** : l'extracteur n'a qu'une sortie (à l'avant). Le four a son entrée à l'arrière et sa sortie à l'avant (gueule sur le côté gauche). Le coffre a son entrée à l'arrière et sa sortie à l'avant. Un seul convoyeur par port.
 - **Vitesse** : 1,5 m/s, avec au moins 1 s d'écart entre deux objets, soit **60 objets/min au maximum**. Un tapis de `L` m contient au plus `⌊L / 1,5⌋ + 1` objets.
 - **Calcul** : chaque objet a un âge entier en ticks ; il arrive quand son âge atteint la durée du trajet. À chaque tick, dans l'ordre des identifiants : les objets avancent, celui du bout est livré si l'entrée l'accepte, puis un objet est pris à la source s'il y a la place.
 - **Conservation** : un objet quitte la source au moment exact où il monte sur le tapis, et n'en descend qu'au moment exact où la destination l'accepte. Si l'entrée est pleine ou refuse l'objet (par exemple une plaque dans un four), le tapis s'accumule en gardant l'écart, puis cesse de prendre. Rien n'est perdu.

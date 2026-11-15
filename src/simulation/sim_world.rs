@@ -8,8 +8,10 @@ use std::collections::BTreeMap;
 
 use super::clock::SimClock;
 use super::energy::{GENERATOR_POWER_W, NetworkStats, PowerGrid, PowerNode};
+use super::hub::Deliveries;
 use super::logistics::{CONVEYOR_MAX_LENGTH_M, CONVEYOR_MIN_LENGTH_M, Conveyor};
-use super::production::{EXTRACTOR_POWER_W, Extractor, FURNACE_POWER_W, Furnace};
+use super::modules::{MachineStats, Module, ModuleError, ModuleKind};
+use super::production::{Extractor, Furnace};
 use crate::inventory::{Inventory, ItemKind};
 use crate::world::deposits::{Deposit, DepositId};
 
@@ -25,16 +27,18 @@ pub enum BuildingKind {
     Furnace,
     Storage,
     Pole,
+    Hub,
 }
 
 impl BuildingKind {
     /// Ordre d'affichage dans le menu de construction.
-    pub const ALL: [BuildingKind; 5] = [
+    pub const ALL: [BuildingKind; 6] = [
         BuildingKind::Extractor,
         BuildingKind::Generator,
         BuildingKind::Furnace,
         BuildingKind::Storage,
         BuildingKind::Pole,
+        BuildingKind::Hub,
     ];
 
     pub fn name(self) -> &'static str {
@@ -44,6 +48,7 @@ impl BuildingKind {
             BuildingKind::Furnace => "Four",
             BuildingKind::Storage => "Coffre",
             BuildingKind::Pole => "Poteau électrique",
+            BuildingKind::Hub => "Hub de livraison",
         }
     }
 
@@ -57,12 +62,23 @@ impl BuildingKind {
 
     /// A-t-il une entrée qui accepte des objets d'un convoyeur ?
     pub fn has_input(self) -> bool {
-        matches!(self, BuildingKind::Furnace | BuildingKind::Storage)
+        matches!(
+            self,
+            BuildingKind::Furnace | BuildingKind::Storage | BuildingKind::Hub
+        )
+    }
+
+    /// Nombre d'emplacements de module (noyaux de production uniquement).
+    pub fn module_slots(self) -> u8 {
+        match self {
+            BuildingKind::Extractor | BuildingKind::Furnace => 2,
+            _ => 0,
+        }
     }
 
     /// Fait-il partie du réseau électrique ? (le coffre n'en a pas besoin)
     pub fn is_power_node(self) -> bool {
-        self != BuildingKind::Storage
+        !matches!(self, BuildingKind::Storage | BuildingKind::Hub)
     }
 }
 
@@ -82,6 +98,8 @@ pub enum Machine {
     Furnace(Furnace),
     Storage(Inventory),
     Pole,
+    /// Hub de livraison : consomme et compte tout ce qu'on lui apporte.
+    Hub,
 }
 
 impl Machine {
@@ -92,6 +110,7 @@ impl Machine {
             Machine::Furnace(_) => BuildingKind::Furnace,
             Machine::Storage(_) => BuildingKind::Storage,
             Machine::Pole => BuildingKind::Pole,
+            Machine::Hub => BuildingKind::Hub,
         }
     }
 
@@ -123,6 +142,7 @@ impl Machine {
         match self {
             Machine::Furnace(f) => f.insert(kind, 1) == 1,
             Machine::Storage(inventory) => inventory.add(kind, 1) == 1,
+            Machine::Hub => true,
             _ => false,
         }
     }
@@ -131,8 +151,8 @@ impl Machine {
     fn power_balance(&self) -> (u64, u64) {
         match self {
             Machine::Generator(g) if g.enabled => (GENERATOR_POWER_W, 0),
-            Machine::Extractor(e) if e.wants_power() => (0, EXTRACTOR_POWER_W),
-            Machine::Furnace(f) if f.wants_power() => (0, FURNACE_POWER_W),
+            Machine::Extractor(e) if e.wants_power() => (0, e.power_demand_w()),
+            Machine::Furnace(f) if f.wants_power() => (0, f.power_demand_w()),
             _ => (0, 0),
         }
     }
@@ -143,7 +163,7 @@ impl Machine {
             Machine::Extractor(e) => e.enabled,
             Machine::Generator(g) => g.enabled,
             Machine::Furnace(f) => f.enabled,
-            Machine::Storage(_) | Machine::Pole => true,
+            Machine::Storage(_) | Machine::Pole | Machine::Hub => true,
         }
     }
 
@@ -152,7 +172,7 @@ impl Machine {
             Machine::Extractor(e) => e.enabled = on,
             Machine::Generator(g) => g.enabled = on,
             Machine::Furnace(f) => f.enabled = on,
-            Machine::Storage(_) | Machine::Pole => {}
+            Machine::Storage(_) | Machine::Pole | Machine::Hub => {}
         }
     }
 }
@@ -193,7 +213,7 @@ impl ConveyorError {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SimWorld {
     clock: SimClock,
     next_building: u64,
@@ -201,6 +221,10 @@ pub struct SimWorld {
     buildings: BTreeMap<BuildingId, Building>,
     /// Convoyeurs, dans le même espace d'identifiants que les bâtiments.
     conveyors: BTreeMap<BuildingId, Conveyor>,
+    /// Modules fixés sur les machines, même espace d'identifiants.
+    modules: BTreeMap<BuildingId, Module>,
+    /// Livraisons cumulées de tous les hubs (objectifs).
+    deliveries: Deliveries,
     grid: PowerGrid,
     /// Incrémenté à chaque recalcul des réseaux (pour redessiner les câbles).
     grid_version: u64,
@@ -225,7 +249,7 @@ impl SimWorld {
             match &mut building.machine {
                 Machine::Extractor(e) => e.step(now, power),
                 Machine::Furnace(f) => f.step(power),
-                Machine::Generator(_) | Machine::Storage(_) | Machine::Pole => {}
+                Machine::Generator(_) | Machine::Storage(_) | Machine::Pole | Machine::Hub => {}
             }
         }
         for conveyor in self.conveyors.values_mut() {
@@ -235,6 +259,9 @@ impl SimWorld {
                 && dest.machine.accept_input(kind)
             {
                 conveyor.deliver();
+                if dest.machine.kind() == BuildingKind::Hub {
+                    self.deliveries.record(kind, 1, now);
+                }
             }
             if conveyor.can_load()
                 && let Some(source) = self.buildings.get_mut(&conveyor.from)
@@ -271,18 +298,116 @@ impl SimWorld {
             BuildingKind::Furnace => Machine::Furnace(Furnace::default()),
             BuildingKind::Storage => Machine::Storage(Inventory::new(STORAGE_SLOTS)),
             BuildingKind::Pole => Machine::Pole,
+            BuildingKind::Hub => Machine::Hub,
         };
         Some(self.add(x, z, machine))
     }
 
-    /// Retire un bâtiment, et les convoyeurs qui y étaient branchés.
+    /// Retire un bâtiment, avec les convoyeurs qui y étaient branchés et ses modules.
     pub fn remove(&mut self, id: BuildingId) -> Option<Building> {
         let removed = self.buildings.remove(&id);
         if removed.is_some() {
             self.conveyors.retain(|_, c| c.from != id && c.to != id);
+            self.modules.retain(|_, m| m.host != id);
             self.rebuild_grid();
         }
         removed
+    }
+
+    /// Vérifie qu'un module de ce type peut se fixer sur l'emplacement `socket` de `host`.
+    pub fn check_module(
+        &self,
+        host: BuildingId,
+        socket: u8,
+        kind: ModuleKind,
+    ) -> Result<(), ModuleError> {
+        let building = self.buildings.get(&host).ok_or(ModuleError::Missing)?;
+        let host_kind = building.machine.kind();
+        if !kind.fits(host_kind) {
+            Err(ModuleError::Incompatible)
+        } else if socket >= host_kind.module_slots() {
+            Err(ModuleError::NoSuchSocket)
+        } else if self.module_at(host, socket).is_some() {
+            Err(ModuleError::SocketTaken)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Fixe un module et recalcule aussitôt les statistiques de la machine.
+    pub fn attach_module(
+        &mut self,
+        host: BuildingId,
+        socket: u8,
+        kind: ModuleKind,
+    ) -> Result<BuildingId, ModuleError> {
+        self.check_module(host, socket, kind)?;
+        let id = BuildingId(self.next_building);
+        self.next_building += 1;
+        self.modules.insert(id, Module { kind, host, socket });
+        self.refresh_stats(host);
+        Ok(id)
+    }
+
+    /// Retire un module ; le contenu de la machine n'est pas touché.
+    pub fn detach_module(&mut self, id: BuildingId) -> Option<Module> {
+        let module = self.modules.remove(&id)?;
+        self.refresh_stats(module.host);
+        Some(module)
+    }
+
+    pub fn module(&self, id: BuildingId) -> Option<&Module> {
+        self.modules.get(&id)
+    }
+
+    pub fn modules(&self) -> impl Iterator<Item = (BuildingId, &Module)> {
+        self.modules.iter().map(|(id, m)| (*id, m))
+    }
+
+    /// Modules d'une machine, par emplacement croissant.
+    pub fn modules_of(&self, host: BuildingId) -> Vec<(BuildingId, Module)> {
+        let mut list: Vec<_> = self
+            .modules
+            .iter()
+            .filter(|(_, m)| m.host == host)
+            .map(|(id, m)| (*id, *m))
+            .collect();
+        list.sort_by_key(|(_, m)| m.socket);
+        list
+    }
+
+    fn module_at(&self, host: BuildingId, socket: u8) -> Option<BuildingId> {
+        self.modules
+            .iter()
+            .find(|(_, m)| m.host == host && m.socket == socket)
+            .map(|(id, _)| *id)
+    }
+
+    /// Premier emplacement libre de la machine, s'il en reste.
+    #[cfg(test)]
+    pub fn free_socket(&self, host: BuildingId) -> Option<u8> {
+        let slots = self.buildings.get(&host)?.machine.kind().module_slots();
+        (0..slots).find(|&s| self.module_at(host, s).is_none())
+    }
+
+    /// Recalcule les statistiques d'une machine d'après ses modules.
+    fn refresh_stats(&mut self, host: BuildingId) {
+        let stats =
+            MachineStats::from_modules(self.modules_of(host).into_iter().map(|(_, m)| m.kind));
+        match self.buildings.get_mut(&host).map(|b| &mut b.machine) {
+            Some(Machine::Extractor(e)) => e.stats = stats,
+            Some(Machine::Furnace(f)) => f.stats = stats,
+            _ => {}
+        }
+    }
+
+    /// Statistiques actuelles d'une machine (de base si elle n'en a pas).
+    pub fn stats_of(&self, host: BuildingId) -> MachineStats {
+        match self.buildings.get(&host).map(|b| &b.machine) {
+            Some(Machine::Extractor(e)) => e.stats,
+            Some(Machine::Furnace(f)) => f.stats,
+            _ => MachineStats::BASE,
+        }
     }
 
     /// Vérifie qu'un convoyeur peut relier la sortie de `from` à l'entrée de `to`.
@@ -419,6 +544,24 @@ impl SimWorld {
         self.extractors()
             .find(|(_, e)| e.deposit == deposit)
             .map(|(id, _)| id)
+    }
+
+    /// Livraisons cumulées de tous les hubs.
+    pub fn deliveries(&self) -> &Deliveries {
+        &self.deliveries
+    }
+
+    /// Livre à la main `count` objets à un hub ; retourne `false` si ce n'est pas un hub.
+    /// L'appelant retire d'abord les objets de l'inventaire du joueur (conservation).
+    pub fn deliver_by_hand(&mut self, hub: BuildingId, kind: ItemKind, count: u64) -> bool {
+        let is_hub = self
+            .buildings
+            .get(&hub)
+            .is_some_and(|b| b.machine.kind() == BuildingKind::Hub);
+        if is_hub {
+            self.deliveries.record(kind, count, self.clock.tick());
+        }
+        is_hub
     }
 
     pub fn grid(&self) -> &PowerGrid {
@@ -647,6 +790,128 @@ mod tests {
         let (mut sim, ..) = powered_extractor();
         let storage = sim.add_building(BuildingKind::Storage, 5.0, 2.0).unwrap();
         assert!(sim.network_stats(storage).is_none());
+    }
+
+    #[test]
+    fn modules_change_rate_and_demand_immediately() {
+        let (mut sim, _, _, e) = powered_extractor();
+        let speed = sim.attach_module(e, 0, ModuleKind::Speed).unwrap();
+        run(&mut sim, TICKS_PER_MINUTE);
+        assert_eq!(sim.extractor(e).unwrap().produced_total(), 45);
+        assert_eq!(sim.network_stats(e).unwrap().demanded_w, 48_000);
+
+        let efficiency = sim.attach_module(e, 1, ModuleKind::Efficiency).unwrap();
+        assert_eq!(sim.stats_of(e).power_percent, 130);
+        sim.detach_module(speed);
+        sim.detach_module(efficiency);
+        assert_eq!(sim.stats_of(e), MachineStats::BASE);
+    }
+
+    #[test]
+    fn module_rules_sockets_and_compatibility() {
+        let (mut sim, generator, _, e) = powered_extractor();
+        assert_eq!(
+            sim.attach_module(generator, 0, ModuleKind::Speed),
+            Err(ModuleError::Incompatible)
+        );
+        sim.attach_module(e, 0, ModuleKind::Speed).unwrap();
+        assert_eq!(
+            sim.attach_module(e, 0, ModuleKind::Efficiency),
+            Err(ModuleError::SocketTaken)
+        );
+        assert_eq!(sim.free_socket(e), Some(1));
+        sim.attach_module(e, 1, ModuleKind::Speed).unwrap();
+        assert_eq!(sim.free_socket(e), None);
+        assert_eq!(
+            sim.attach_module(e, 2, ModuleKind::Speed),
+            Err(ModuleError::NoSuchSocket)
+        );
+    }
+
+    #[test]
+    fn detaching_keeps_the_machine_contents() {
+        let mut sim = SimWorld::default();
+        let f = sim.add_building(BuildingKind::Furnace, 0.0, 0.0).unwrap();
+        sim.furnace_mut(f).unwrap().insert(ItemKind::IronOre, 12);
+        let m = sim.attach_module(f, 0, ModuleKind::Speed).unwrap();
+        sim.detach_module(m);
+        assert_eq!(sim.furnace(f).unwrap().input().count(), 12);
+        assert!(sim.module(m).is_none());
+    }
+
+    #[test]
+    fn removing_a_machine_removes_its_modules() {
+        let (mut sim, _, _, e) = powered_extractor();
+        let m = sim.attach_module(e, 0, ModuleKind::Efficiency).unwrap();
+        sim.remove(e);
+        assert!(sim.module(m).is_none(), "pas de module fantôme");
+        assert_eq!(sim.modules().count(), 0);
+    }
+
+    #[test]
+    fn hub_counts_what_conveyors_bring() {
+        let (mut sim, _, _, extractor) = powered_extractor();
+        let hub = sim.add_building(BuildingKind::Hub, 5.0, 14.0).unwrap();
+        sim.add_conveyor(extractor, hub, 8.0).unwrap();
+        assert!(
+            sim.network_stats(hub).is_none(),
+            "le hub n'a pas besoin d'énergie"
+        );
+        run(&mut sim, 2 * TICKS_PER_MINUTE);
+        let delivered = sim.deliveries().total(ItemKind::IronOre);
+        // 60 minerais extraits en 2 min, moins ceux encore sur le tapis (≤ 6).
+        assert!((54..=60).contains(&delivered), "{delivered}");
+        assert_eq!(sim.deliveries().per_minute(sim.clock().tick()), 30);
+    }
+
+    #[test]
+    fn hand_delivery_only_works_on_a_hub() {
+        let (mut sim, generator, ..) = powered_extractor();
+        let hub = sim.add_building(BuildingKind::Hub, 30.0, 0.0).unwrap();
+        assert!(!sim.deliver_by_hand(generator, ItemKind::IronPlate, 10));
+        assert!(sim.deliver_by_hand(hub, ItemKind::IronPlate, 10));
+        assert_eq!(sim.deliveries().total(ItemKind::IronPlate), 10);
+    }
+
+    /// Test de charge (M7) : 250 unités complètes = 1 000 bâtiments + 250 convoyeurs.
+    /// Lancer avec `cargo test --features dev stress -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "mesure de performance, à lancer à la main"]
+    fn stress_thousand_buildings() {
+        use std::time::Instant;
+        let mut sim = SimWorld::default();
+        let setup = Instant::now();
+        for unit in 0..250u32 {
+            let (x, z) = ((unit % 16) as f32 * 25.0, (unit / 16) as f32 * 25.0);
+            sim.add_building(BuildingKind::Generator, x, z);
+            sim.add_building(BuildingKind::Pole, x + 5.0, z);
+            let e = sim.add_extractor(&Deposit {
+                id: DepositId(unit),
+                kind: ResourceKind::Iron,
+                purity: Purity::Normal,
+                x: x + 10.0,
+                z,
+                radius: 3.0,
+            });
+            let f = sim
+                .add_building(BuildingKind::Furnace, x + 5.0, z + 6.0)
+                .unwrap();
+            sim.add_conveyor(e, f, 7.0).unwrap();
+        }
+        let setup = setup.elapsed();
+        let ticks = TICKS_PER_MINUTE;
+        let start = Instant::now();
+        run(&mut sim, ticks);
+        let per_tick = start.elapsed().as_secs_f64() * 1e6 / f64::from(ticks);
+        println!(
+            "{} bâtiments, {} convoyeurs : pose {:.0} ms, {per_tick:.0} µs par tick ({:.2} % d'un cœur à 20 Hz)",
+            sim.buildings().count(),
+            sim.conveyors().count(),
+            setup.as_secs_f64() * 1000.0,
+            per_tick * 20.0 / 1e6 * 100.0
+        );
+        assert_eq!(sim.buildings().count(), 1000);
+        assert!(per_tick < 5_000.0, "trop lent : {per_tick:.0} µs par tick");
     }
 
     #[test]
