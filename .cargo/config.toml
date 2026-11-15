@@ -1,0 +1,3 @@
+[alias]
+# `cargo dev` : lance le jeu avec la liaison dynamique de Bevy (recompilation rapide).
+dev = "run --features dev"

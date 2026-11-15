@@ -1,0 +1,33 @@
+[package]
+name = "project-ascension"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+description = "Sandbox industriel 3D : exploration, construction et automatisation."
+publish = false
+
+[dependencies]
+# Version épinglée (voir TODO §1) : ne monter de version qu'entre deux jalons.
+bevy = "0.20.1"
+
+[features]
+# Liaison dynamique de Bevy pour des recompilations rapides en développement.
+# Utilisé par l'alias `cargo dev` (voir .cargo/config.toml). Ne pas activer en release.
+dev = ["bevy/dynamic_linking"]
+
+# Notre code : optimisation légère, pour garder une compilation rapide.
+[profile.dev]
+opt-level = 1
+
+# Dépendances (Bevy…) : optimisées une fois pour toutes, le jeu reste fluide en debug.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[lints.clippy]
+# Les systèmes Bevy prennent souvent beaucoup de paramètres et des types de requête complexes.
+too_many_arguments = "allow"
+type_complexity = "allow"
