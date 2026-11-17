@@ -7,15 +7,17 @@
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::input::mouse::AccumulatedMouseMotion;
-use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 
 use crate::app::PlayState;
 use crate::building::Buildings;
 use crate::collision::{collide, highest_top};
+use crate::game::{PendingSave, Screen, WorldSetup, reset};
 use crate::inventory::Inventory;
+use crate::settings::Settings;
 use crate::world::generation::MAX_WADING_DEPTH_M;
-use crate::world::{Rocks, SKY_COLOR, Terrain};
+use crate::world::sky::camera_rendering;
+use crate::world::{Rocks, Terrain};
 
 /// Hauteur des yeux au-dessus du sol, en mètres.
 pub const EYE_HEIGHT: f32 = 1.7;
@@ -101,7 +103,11 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlayerInventory>()
-            .add_systems(Startup, spawn_player)
+            .add_systems(
+                OnEnter(Screen::InGame),
+                spawn_player.in_set(WorldSetup::Spawn),
+            )
+            .add_systems(OnExit(Screen::InGame), reset::<PlayerInventory>)
             .add_systems(
                 Update,
                 (toggle_mode, look_around, move_player)
@@ -111,7 +117,32 @@ impl Plugin for PlayerPlugin {
     }
 }
 
-fn spawn_player(mut commands: Commands, terrain: Res<Terrain>) {
+fn spawn_player(mut commands: Commands, terrain: Res<Terrain>, pending: Option<Res<PendingSave>>) {
+    // Partie chargée : position, regard et mode sauvegardés.
+    if let Some(pending) = pending {
+        let saved = &pending.0.player;
+        let player = Player {
+            yaw: saved.yaw,
+            pitch: saved.pitch,
+            mode: if saved.flying {
+                MoveMode::Fly
+            } else {
+                MoveMode::Walk
+            },
+            ..default()
+        };
+        commands.spawn((
+            Name::new("Joueur"),
+            Camera3d::default(),
+            Transform::from_translation(Vec3::from_array(saved.position)).with_rotation(
+                Quat::from_euler(EulerRot::YXZ, player.yaw, player.pitch, 0.0),
+            ),
+            camera_rendering(),
+            player,
+        ));
+        return;
+    }
+
     let field = &terrain.0;
     let (x, z) = field.find_spawn().unwrap_or_else(|| {
         warn!("Aucune terre émergée trouvée : apparition au centre");
@@ -124,14 +155,7 @@ fn spawn_player(mut commands: Commands, terrain: Res<Terrain>) {
         Name::new("Joueur"),
         Camera3d::default(),
         Transform::from_xyz(x, y, z),
-        DistanceFog {
-            color: SKY_COLOR,
-            falloff: FogFalloff::Linear {
-                start: 200.0,
-                end: 900.0,
-            },
-            ..default()
-        },
+        camera_rendering(),
         Player::default(),
     ));
 }
@@ -149,15 +173,22 @@ fn toggle_mode(keys: Res<ButtonInput<KeyCode>>, mut player: Single<&mut Player>)
     }
 }
 
-fn look_around(mouse: Res<AccumulatedMouseMotion>, player: Single<(&mut Transform, &mut Player)>) {
+fn look_around(
+    mouse: Res<AccumulatedMouseMotion>,
+    settings: Res<Settings>,
+    player: Single<(&mut Transform, &mut Player)>,
+) {
     let delta = mouse.delta;
     if delta == Vec2::ZERO {
         return;
     }
     let (mut transform, mut player) = player.into_inner();
     // Pas de multiplication par le temps : un déplacement de souris est déjà une distance.
-    player.yaw -= delta.x * player.sensitivity;
-    player.pitch = (player.pitch - delta.y * player.sensitivity).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    let sensitivity = player.sensitivity * settings.mouse_sensitivity as f32 / 100.0;
+    let vertical = if settings.invert_y { -1.0 } else { 1.0 };
+    player.yaw -= delta.x * sensitivity;
+    player.pitch =
+        (player.pitch - vertical * delta.y * sensitivity).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     transform.rotation = Quat::from_euler(EulerRot::YXZ, player.yaw, player.pitch, 0.0);
 }
 

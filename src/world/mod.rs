@@ -4,12 +4,15 @@ pub mod deposits;
 pub mod generation;
 pub mod noise;
 pub mod rocks;
+pub mod sky;
 pub mod terrain;
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use bevy::prelude::*;
+
+use crate::game::{Screen, WorldSetup};
 
 use deposits::{DepositConfig, DepositField, ResourceKind};
 use generation::{HeightField, WORLDGEN_VERSION, WorldGenConfig, WorldSeed};
@@ -51,29 +54,24 @@ pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(ClearColor(SKY_COLOR))
-            .insert_resource(GlobalAmbientLight {
-                color: Color::WHITE,
-                brightness: 400.0,
-                ..default()
-            })
-            // PreStartup : la heightmap existe avant que le joueur ne cherche son point d'apparition.
-            .add_systems(PreStartup, generate_world)
+        app.add_plugins(sky::SkyPlugin)
+            // La heightmap existe avant que le joueur ne cherche son point d'apparition.
             .add_systems(
-                Startup,
+                OnEnter(Screen::InGame),
+                generate_world.in_set(WorldSetup::Generate),
+            )
+            .add_systems(
+                OnEnter(Screen::InGame),
                 (
                     spawn_terrain_chunks,
                     spawn_rocks,
                     spawn_deposits,
                     spawn_water,
-                    spawn_sun,
-                ),
+                )
+                    .in_set(WorldSetup::Spawn),
             );
     }
 }
-
-/// Couleur du ciel, réutilisée par le brouillard de la caméra.
-pub const SKY_COLOR: Color = Color::srgb(0.62, 0.76, 0.90);
 
 fn generate_world(mut commands: Commands, params: Res<WorldParams>) {
     let start = Instant::now();
@@ -126,7 +124,7 @@ fn spawn_deposits(
     let mut ore = |color: Color, glow: LinearRgba| {
         materials.add(StandardMaterial {
             base_color: color,
-            emissive: glow,
+            emissive: glow * sky::GLOW,
             metallic: 0.4,
             perceptual_roughness: 0.5,
             ..default()
@@ -191,7 +189,7 @@ fn spawn_rocks(
     });
     let highlighted = materials.add(StandardMaterial {
         base_color: Color::srgb(0.62, 0.58, 0.50),
-        emissive: LinearRgba::rgb(0.25, 0.18, 0.05),
+        emissive: LinearRgba::rgb(0.25, 0.18, 0.05) * sky::GLOW,
         perceptual_roughness: 0.9,
         ..default()
     });
@@ -252,34 +250,24 @@ fn spawn_terrain_chunks(
     );
 }
 
-/// Mer simplifiée au niveau y = 0, plus grande que la carte pour former l'horizon.
+/// Mer simplifiée au niveau y = 0. Très grande (30 km) : son bord se perd dans la brume
+/// et ne découpe jamais l'horizon.
 fn spawn_water(
     mut commands: Commands,
     terrain: Res<Terrain>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let size = terrain.0.config().size_m as f32 * 4.0;
+    let size = (terrain.0.config().size_m as f32 * 4.0).max(30_000.0);
     commands.spawn((
         Name::new("Mer"),
         Mesh3d(meshes.add(Plane3d::default().mesh().size(size, size))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgba(0.12, 0.32, 0.50, 0.82),
+            base_color: Color::srgba(0.06, 0.24, 0.38, 0.86),
             alpha_mode: AlphaMode::Blend,
-            perceptual_roughness: 0.15,
+            perceptual_roughness: 0.08,
+            reflectance: 0.3,
             ..default()
         })),
-    ));
-}
-
-fn spawn_sun(mut commands: Commands) {
-    commands.spawn((
-        Name::new("Soleil"),
-        DirectionalLight {
-            illuminance: 10_000.0,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        Transform::from_xyz(30.0, 60.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 }

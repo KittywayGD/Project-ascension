@@ -1,13 +1,17 @@
-//! Overlay de debug (F3), outils de test (T, I, O) et bandeau de pause.
+//! Overlay de debug (F3), outils de test (T, I, O) et captures (F12).
+
+pub mod capture;
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 
 use crate::app::PlayState;
-use crate::building::{BuildMode, StreamStats, VIEW_LOAD_M};
+use crate::building::{BuildMode, StreamStats};
+use crate::game::{Screen, WorldSetup};
 use crate::interaction::{Aim, Target};
 use crate::inventory::ItemKind;
 use crate::player::{EYE_HEIGHT, MoveMode, Player, PlayerInventory};
+use crate::settings::Settings;
 use crate::simulation::Simulation;
 use crate::simulation::clock::TICK_RATE_HZ;
 use crate::simulation::production::{MachineState, extractor_rate_per_min};
@@ -25,19 +29,20 @@ const TEST_ITEMS: u32 = 10;
 #[derive(Component)]
 struct DebugOverlay;
 
-#[derive(Component)]
-struct PauseBanner;
-
 pub struct DebugPlugin;
 
 impl Plugin for DebugPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(FrameTimeDiagnosticsPlugin::default())
-            .add_systems(Startup, spawn_ui)
-            .add_systems(Update, (toggle_overlay, update_overlay))
-            .add_systems(Update, test_tools.run_if(in_state(PlayState::Running)))
-            .add_systems(OnEnter(PlayState::Paused), show_pause_banner::<true>)
-            .add_systems(OnExit(PlayState::Paused), show_pause_banner::<false>);
+        app.add_plugins((
+            FrameTimeDiagnosticsPlugin::default(),
+            capture::CapturePlugin,
+        ))
+        .add_systems(OnEnter(Screen::InGame), spawn_ui.in_set(WorldSetup::Spawn))
+        .add_systems(
+            Update,
+            (toggle_overlay, update_overlay).run_if(in_state(Screen::InGame)),
+        )
+        .add_systems(Update, test_tools.run_if(in_state(PlayState::Running)));
     }
 }
 
@@ -56,33 +61,6 @@ fn spawn_ui(mut commands: Commands) {
             ..default()
         },
     ));
-
-    commands
-        .spawn((
-            PauseBanner,
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-        ))
-        .with_child((
-            Text::new(
-                "PAUSE\n\nClic ou Échap : jouer\nMaj + Échap : quitter\n\
-                 Tab : inventaire · E : ouvrir une machine · B : construction\n\
-                 F3 : overlay debug · T : vitesse du temps · H : aide complète",
-            ),
-            TextFont::from_font_size(22.0),
-            TextColor(Color::WHITE),
-            TextLayout::justify(Justify::Center),
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-            Node {
-                padding: UiRect::all(Val::Px(24.0)),
-                ..default()
-            },
-        ));
 }
 
 fn toggle_overlay(
@@ -149,6 +127,7 @@ fn update_overlay(
     target: Res<Target>,
     build: Res<BuildMode>,
     stream: Res<StreamStats>,
+    settings: Res<Settings>,
     player: Single<(&Transform, &Player)>,
     mut overlay: Single<&mut Text, With<DebugOverlay>>,
 ) {
@@ -283,9 +262,10 @@ fn update_overlay(
         format!("Réseaux : {}", networks.join(" · "))
     });
     lines.push(format!(
-        "Affichage : {}/{} bâtiments chargés (rayon {VIEW_LOAD_M:.0} m) · simulation : {} bâtiments, tous actifs",
+        "Affichage : {}/{} bâtiments chargés (rayon {} m) · simulation : {} bâtiments, tous actifs",
         stream.loaded,
         stream.total,
+        settings.view_distance_m,
         world.buildings().count()
     ));
     lines.push(format!(
@@ -406,14 +386,6 @@ fn compass(dx: f32, dz: f32) -> &'static str {
     let angle = dx.atan2(-dz).to_degrees().rem_euclid(360.0);
     const NAMES: [&str; 8] = ["N", "N-E", "E", "S-E", "S", "S-O", "O", "N-O"];
     NAMES[((angle + 22.5) / 45.0) as usize % 8]
-}
-
-fn show_pause_banner<const VISIBLE: bool>(mut banner: Single<&mut Visibility, With<PauseBanner>>) {
-    **banner = if VISIBLE {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
 }
 
 #[cfg(test)]

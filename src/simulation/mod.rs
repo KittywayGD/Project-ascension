@@ -11,12 +11,14 @@ pub mod logistics;
 pub mod modules;
 pub mod production;
 pub mod sim_world;
+pub mod tech;
 
 use std::time::Instant;
 
 use bevy::prelude::*;
 
 use crate::app::PlayState;
+use crate::game::{Screen, reset};
 use clock::TICK_RATE_HZ;
 use sim_world::SimWorld;
 
@@ -56,8 +58,12 @@ impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Time::<Fixed>::from_hz(f64::from(TICK_RATE_HZ)))
             .init_resource::<Simulation>()
+            .add_systems(OnExit(Screen::InGame), reset::<Simulation>)
             // Les usines tournent aussi menu ouvert ; seule la pause fige la simulation.
-            .add_systems(FixedUpdate, step.run_if(not(in_state(PlayState::Paused))));
+            .add_systems(
+                FixedUpdate,
+                step.run_if(in_state(PlayState::Running).or_else(in_state(PlayState::Menu))),
+            );
     }
 }
 

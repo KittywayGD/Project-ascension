@@ -29,9 +29,9 @@
 
 ### Hors périmètre de la V0
 
-- [ ] **↗** Arbre de technologies, paliers et recherche — **prévu en V0.1** (version primitive).
-- [ ] **↗** Sauvegarde / chargement — **prévu en V0.1**.
-- [ ] **↗** Écran titre et menus (la V0 se lance directement dans un monde).
+- [x] **↗** Arbre de technologies, paliers et recherche — version primitive livrée en V0.1.
+- [x] **↗** Sauvegarde / chargement — livré en V0.1.
+- [x] **↗** Écran titre et menus — livrés en V0.1 (les options de lancement le sautent toujours).
 - [ ] **↗** Trains, rails, signaux et gares.
 - [ ] **↗** Drones et stations logistiques.
 - [ ] **↗** Véhicules libres, machines roulantes et physique façon Besiege.
@@ -71,7 +71,7 @@
 - [ ] **⭐** Décrire bâtiments, recettes et modules dans des **fichiers de données** (RON ou TOML), modifiables sans recompiler.
 - [ ] **⭐** Épingler la version de Bevy et ne monter de version qu'entre deux jalons.
 - [x] **⭐** ~~Épingler la crate de bruit~~ Bruit maison figé avec le projet ; tout changement de relief incrémente `WorldGenVersion`.
-- [ ] **↗** Choisir un format de sauvegarde versionné (V0.1).
+- [x] **↗** Choisir un format de sauvegarde versionné (V0.1) : RON via serde, `SAVE_VERSION`.
 - [ ] **⭐** Prévoir des paramètres de génération regroupés dans une structure versionnée.
 - [ ] Documenter les décisions dans `docs/decisions/0001-architecture.md`.
 - [ ] Écrire un mini glossaire : node, gisement, core, module, socket, réseau, tick, chunk, secteur, seed.
@@ -448,6 +448,9 @@ project-ascension/
 - [x] Couleurs / icônes cohérentes pour `actif`, `hors tension`, `bloqué`, `invalide` (voyants vert/orange/rouge/gris, fantôme vert/rouge, ports bleu/jaune).
 - [x] Messages d'erreur utiles plutôt que des plantages silencieux (motifs de refus dans les bandeaux et panneaux).
 - [x] Outils de test accessibles par raccourci : T (temps), G (minerais), I/O (machine visée), F3 (overlay), listés dans l'aide (H).
+- [x] **Passe de lisibilité** (`docs/visual-style.md`) : une couleur par famille de bâtiment, silhouettes distinctes (générateur ≠ extracteur), flèches de sens sur les convoyeurs, voyant rouge clignotant sans énergie, ciel atmosphérique + éclairage physique + bloom, roche réservée aux falaises, police avec accents.
+- [x] Outil de capture : F12 en jeu, `--screenshot` pour 3 vues fixes automatiques.
+- [ ] **↗** Vrai travail artistique (modèles, textures, shaders, végétation, sons, animations) : **après la V0.1**, une fois les bâtiments figés.
 
 ### Qualité
 
@@ -477,39 +480,48 @@ project-ascension/
 
 ## V0.1 — Arbre techno primitif + sauvegardes ↗
 
-> Ne pas commencer avant la validation de la V0.
+> Décisions (2026-11-16) : format **RON** via serde, construction **payée en plaques** (remboursée au démontage), **convoyeurs verrouillés** au départ, **plusieurs mondes nommés**. Détails : [`docs/save-format.md`](docs/save-format.md), [`docs/simulation.md`](docs/simulation.md).
 
 ### Arbre de technologies primitif
 
-- [ ] Ajouter un champ `unlocked_by` aux définitions de bâtiments, recettes et modules.
-- [ ] Débloquer les paliers en livrant des items au hub (réutilise le compteur de M5).
-- [ ] Afficher les paliers et leur état dans une UI simple.
-- [ ] Décider si la construction devient payante avec la progression.
+- [x] Paliers débloqués par les livraisons au hub (cumulées, déjà sauvegardées : aucun état en plus) : `simulation/tech.rs`.
+- [x] Palier 0 « Départ » (extracteur, générateur, poteau, four, coffre, hub) · 1 « Logistique » 50 fer → convoyeurs · 2 « Accélération » 50 cuivre → module de vitesse · 3 « Rendement » 300 fer + 200 cuivre → module d'efficacité · 4 « Industrie » 1 000 fer (vide, prêt pour la suite).
+- [x] Paliers affichés en haut à droite, notification au déblocage, outils verrouillés grisés dans le menu B avec le palier à atteindre.
+- [x] Construction payante en plaques de l'inventaire (prix dans le menu et le bandeau), remboursée au démontage avec le contenu (convoyeurs et modules attachés compris). Kit de départ : 50 plaques de fer.
+- [x] Mode **créatif** par monde (et pour `--demo`) : tout débloqué, construction gratuite.
+- [ ] **↗** Champ `unlocked_by` dans des fichiers de données (quand bâtiments et recettes passeront en RON/TOML).
 
 ### Sauvegarde
 
-- [ ] Définir un `SaveGame` **versionné**.
-- [ ] Sauvegarder seed, version/config de worldgen, paramètres de monde.
-- [ ] Sauvegarder position/orientation du joueur et état pertinent de la partie.
-- [ ] Sauvegarder bâtiments, transforms et identifiants persistants.
-- [ ] Sauvegarder connexions d'énergie et de logistique via identifiants persistants.
-- [ ] Sauvegarder inventaires, buffers, énergie et progrès des recettes.
-- [ ] Sauvegarder modules attachés et leurs configurations.
-- [ ] Sauvegarder la liste des rochers destructibles déjà détruits.
-- [ ] Sauvegarder la progression de l'arbre techno et le compteur du hub.
-- [ ] Restaurer correctement les réseaux après chargement.
-- [ ] Écrire atomiquement (fichier temporaire + remplacement) pour réduire le risque de corruption.
-- [ ] Prévoir message d'erreur et solution propre pour sauvegarde absente/incompatible/corrompue.
-- [ ] Ajouter une option de sauvegarde manuelle ; autosave ensuite.
-- [ ] Définir ce que fait le jeu pendant qu'il est **fermé** (recommandation : **aucune production hors ligne**).
-- [ ] Ajouter tests de sauvegarde → rechargement → poursuite de simulation.
-- [ ] Ajouter un écran titre minimal : nouvelle partie, charger, quitter.
+- [x] `SaveGame` **versionné** (`SAVE_VERSION` 1), en RON lisible : `persistence.rs`.
+- [x] Seed et version du générateur (le monde est régénéré, pas stocké ; une autre version du générateur est refusée).
+- [x] Position, regard, mode marche/vol et inventaire du joueur.
+- [x] Bâtiments, positions, rotations et identifiants persistants (`BuildingId`, compteur compris).
+- [x] Convoyeurs (objets en transit compris) et modules par identifiants ; réseaux électriques recalculés au chargement.
+- [x] Inventaires, tampons, progression des recettes, compteurs de production, livraisons du hub.
+- [x] Rochers détruits.
+- [x] Écriture **atomique** (fichier temporaire, ancienne version gardée en `.bak`).
+- [x] Sauvegarde illisible ou incompatible : message clair à l'écran titre, « Restaurer la copie précédente » si un `.bak` existe (le fichier abîmé est gardé en `.ron.corrupt`).
+- [x] F5, sauvegarde automatique toutes les 2 min (hors pause), en revenant au menu et en quittant.
+- [x] Jeu fermé : **aucune production hors ligne** (la simulation reprend là où elle s'était arrêtée).
+- [x] Tests : sauvegarde → rechargement → 3 000 ticks identiques à la partie d'origine ; versions ; fichiers tronqués ; copie de secours ; noms.
+- [x] Écran titre : mondes sauvegardés (jouer, supprimer avec confirmation), nouveau monde (nom, seed, mode), quitter. Menu pause : reprendre, sauvegarder, revenir au menu, quitter.
+- [x] Options `--name` (monde lancé en ligne de commande avec emplacement) et `--load` (reprendre un monde sans passer par le titre).
+
+### Options du joueur
+
+- [x] Menu **Options** depuis l'écran titre et le menu pause, enregistré dans `settings.ron` (champs manquants → valeurs par défaut).
+- [x] Contrôles : sensibilité de la souris (20 à 300 %), inversion de l'axe vertical, champ de vision (40 à 100°).
+- [x] Affichage : plein écran, synchronisation verticale, ombres (désactivées / basses / hautes), halo lumineux, distance d'affichage des bâtiments (75 à 400 m), taille de l'interface (70 à 160 %).
+- [x] Partie : sauvegarde automatique (jamais, 1, 2, 5 ou 10 min).
+- [ ] **↗** Raccourcis clavier configurables, volume (quand il y aura du son), langue.
 
 **Validation V0.1**
 
-- [ ] Après fermeture et relance, la même usine et ses connexions sont retrouvées.
-- [ ] Une sauvegarde interrompue ou invalide ne détruit pas silencieusement l'unique copie valide.
-- [ ] Un palier se débloque en livrant au hub les items demandés.
+- [x] Après fermeture et relance, la même usine et ses connexions sont retrouvées (vérifié avec `--load` : bâtiments, objets sur les tapis, progression).
+- [x] Une sauvegarde interrompue ou invalide ne détruit pas silencieusement l'unique copie valide (test + écran titre).
+- [ ] Un palier se débloque en livrant au hub les items demandés : couvert par les tests, **à vérifier en jeu**.
+- [ ] Partie complète en mode normal (kit de départ → convoyeurs → modules) jouée en vrai, pour juger les prix.
 
 ---
 
@@ -649,6 +661,9 @@ project-ascension/
 | 2026-11-15 | M4 | Convoyeurs et ports validés en jeu. Modules vitesse / efficacité sur le toit (2 emplacements), stats additives, retrait depuis le panneau ou au clic droit, 123 tests | Valider les modules en jeu ; puis le hub (M5) et M6 (hors champ) |
 | 2026-11-15 | M5 + M6 | Modules validés en jeu. Hub de livraison + 5 objectifs (suivi, notification), affichage des bâtiments déchargé au-delà de 170 m sans toucher à la simulation, 128 tests | S'éloigner puis revenir en jeu ; puis M7 (UX minimale, stabilisation) |
 | 2026-11-15 | M7 | Hub validé en jeu. Four : entrée et sortie opposées. Aide (H), scène de démo (`--demo`), outil G, coût du tick dans l'overlay, test de charge (1 000 bâtiments : 38 µs/tick), bugs connus, 133 tests | Valider : s'éloigner/revenir, plusieurs minutes sans crash, boucle plaisante ; puis V0.1 (sauvegardes + arbre techno) |
+| 2026-11-16 | M7 (lisibilité) | Couleurs par famille, silhouettes, flèches sur les tapis, voyant clignotant, atmosphère + éclairage physique + bloom (60 FPS), terrain recoloré, police avec accents, captures F12 / `--screenshot`, 138 tests | Lisibilité validée en jeu. 2 h simulées à ×100 (≈ 144 000 ticks) sans crash. Reste : s'éloigner/revenir, quelques minutes de jeu réel, boucle plaisante ; puis V0.1 |
+| 2026-11-16 | V0.1 | Sauvegardes RON versionnées (atomiques, copie de secours), écran titre multi-mondes, menu pause, F5 + autosave, paliers débloqués par le hub, construction payée/remboursée, mode créatif, `--name` / `--load`, captures des menus, 152 tests | Jouer une partie normale complète pour juger les prix et le rythme des paliers |
+| 2026-11-16 | V0.1 (options) | Les deux modes testés en jeu (« ça va plutôt bien »). Menu Options (titre + pause) : souris, champ de vision, plein écran, vsync, ombres, halo, distance d'affichage, taille de l'interface, autosave ; `settings.ron`, 157 tests | Jouer une partie normale complète pour juger les prix et le rythme des paliers |
 
 ---
 
@@ -662,7 +677,7 @@ project-ascension/
 - [ ] Placement sur fondations : grille, snap libre, ou mode hybride ? → **À trancher en M2.** *Proposé :* grille de 1 m + rotation 90° + fondation automatique.
 - [ ] Nombre de types de ressources obligatoires lors de la première vraie génération ?
 - [ ] Taille de carte définitive après premiers tests de déplacement et de performance ?
-- [ ] Production hors ligne : sans objet en V0 (pas de sauvegarde), à trancher en V0.1.
+- [x] Production hors ligne : **aucune** (V0.1). La partie reprend exactement où elle s'était arrêtée.
 
 ---
 

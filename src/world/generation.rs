@@ -5,6 +5,7 @@
 //! seed donnée doit incrémenter [`WORLDGEN_VERSION`] (les tests de référence le rappellent).
 
 use bevy::math::Vec3;
+use serde::{Deserialize, Serialize};
 
 use super::noise::{Perlin, SplitMix64};
 
@@ -17,7 +18,7 @@ pub const WORLDGEN_VERSION: WorldGenVersion = WorldGenVersion(2);
 /// Au-delà de cette profondeur d'eau, on ne peut plus avancer à pied (mètres).
 pub const MAX_WADING_DEPTH_M: f32 = 1.2;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WorldSeed(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

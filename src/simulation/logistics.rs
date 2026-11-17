@@ -14,6 +14,7 @@ use std::collections::VecDeque;
 use super::clock::TICK_RATE_HZ;
 use super::sim_world::BuildingId;
 use crate::inventory::ItemKind;
+use serde::{Deserialize, Serialize};
 
 /// Vitesse de déplacement des objets, en m/s.
 pub const CONVEYOR_SPEED_MPS: f32 = 1.5;
@@ -34,13 +35,13 @@ pub fn travel_ticks(length_m: f32) -> u32 {
     ((length_m / CONVEYOR_SPEED_MPS * TICK_RATE_HZ as f32).ceil() as u32).max(1)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct BeltItem {
     kind: ItemKind,
     age: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Conveyor {
     pub from: BuildingId,
     pub to: BuildingId,

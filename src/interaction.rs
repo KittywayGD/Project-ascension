@@ -5,6 +5,7 @@ use bevy::prelude::*;
 
 use crate::app::PlayState;
 use crate::building::{BuildMode, Buildings};
+use crate::game::{Screen, WorldSetup, reset};
 use crate::player::Player;
 use crate::simulation::Simulation;
 use crate::simulation::sim_world::BuildingId;
@@ -70,7 +71,11 @@ pub struct InteractionPlugin;
 impl Plugin for InteractionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Target>()
-            .add_systems(Startup, spawn_crosshair)
+            .add_systems(
+                OnEnter(Screen::InGame),
+                spawn_crosshair.in_set(WorldSetup::Spawn),
+            )
+            .add_systems(OnExit(Screen::InGame), reset::<Target>)
             .add_systems(
                 Update,
                 (update_target, highlight_rock, destroy_rock)

@@ -207,9 +207,9 @@ mod tests {
         let plates = sim.deliveries().total(ItemKind::IronPlate);
         assert!((190..=225).contains(&plates), "{plates} plaques livrées");
         assert_eq!(
-            sim.deliveries().goals_reached(),
+            crate::simulation::tech::tier_reached(sim.deliveries()),
             1,
-            "50 plaques de fer : atteint"
+            "50 plaques de fer : palier « Logistique » atteint"
         );
     }
 

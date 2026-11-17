@@ -16,6 +16,7 @@ use super::clock::TICK_RATE_HZ;
 use super::modules::MachineStats;
 use crate::inventory::{Inventory, ItemBuffer, ItemKind, MachineSlot};
 use crate::world::deposits::{DepositId, Purity, ResourceKind};
+use serde::{Deserialize, Serialize};
 
 pub const TICKS_PER_MINUTE: u32 = TICK_RATE_HZ * 60;
 
@@ -73,7 +74,7 @@ pub fn furnace_recipe(input: ItemKind) -> Option<&'static Recipe> {
 }
 
 /// État d'une machine, commun à l'extracteur et au four.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MachineState {
     Active,
     /// Rien à transformer (four sans minerai).
@@ -98,7 +99,7 @@ impl MachineState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Extractor {
     pub deposit: DepositId,
     pub enabled: bool,
@@ -223,7 +224,7 @@ impl Extractor {
 }
 
 /// Four : fond un minerai en plaque. Le type de minerai déposé choisit la recette.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Furnace {
     pub enabled: bool,
     /// Vitesse et consommation, recalculées à chaque ajout ou retrait de module.

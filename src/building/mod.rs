@@ -14,9 +14,13 @@ use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
 use crate::app::PlayState;
+use crate::game::GameSession;
+use crate::game::{Screen, WorldSetup, reset};
 use crate::interaction::{Aim, Target, update_target};
 use crate::inventory::ItemKind;
+use crate::player::PlayerInventory;
 use crate::player::{PLAYER_RADIUS, Player};
+use crate::settings::Settings;
 use crate::simulation::Simulation;
 use crate::simulation::energy::{GENERATOR_POWER_W, POLE_RANGE_M};
 use crate::simulation::logistics::{
@@ -26,7 +30,12 @@ use crate::simulation::modules::ModuleKind;
 use crate::simulation::production::{
     EXTRACTOR_POWER_W, FURNACE_POWER_W, MachineState, extractor_rate_per_min,
 };
-use crate::simulation::sim_world::{BuildingId, BuildingKind, Machine, STORAGE_SLOTS};
+use crate::simulation::sim_world::{BuildingId, BuildingKind, Machine, STORAGE_SLOTS, SimWorld};
+use crate::simulation::tech::{
+    self, Cost, TIERS, Unlock, building_cost, conveyor_cost, describe, is_unlocked, module_cost,
+    tier_of,
+};
+use crate::world::sky::GLOW;
 use crate::world::{Deposits, Rocks, Terrain};
 use placement::{
     ConveyorPreview, MODULE_HALF, ModulePreview, PlacedBuilding, PlacedBuildings, PlacementContext,
@@ -55,6 +64,43 @@ impl BuildTool {
         BuildTool::Module(ModuleKind::Efficiency),
     ];
 
+    /// Ce que le palier doit débloquer pour pouvoir utiliser cet outil.
+    pub fn unlock(self) -> Unlock {
+        match self {
+            BuildTool::Building(kind) => Unlock::Building(kind),
+            BuildTool::Conveyor => Unlock::Conveyor,
+            BuildTool::Module(kind) => Unlock::Module(kind),
+        }
+    }
+
+    /// Coût affiché dans le menu (convoyeur : par tranche de 2 m).
+    pub fn cost_label(self) -> String {
+        match self {
+            BuildTool::Building(kind) => describe(&building_cost(kind)),
+            BuildTool::Conveyor => "1 plaque de fer par 2 m".into(),
+            BuildTool::Module(kind) => describe(&module_cost(kind)),
+        }
+    }
+
+    /// Raison pour laquelle l'outil est verrouillé, `None` s'il est disponible.
+    pub fn locked_reason(self, sim: &Simulation, creative: bool) -> Option<String> {
+        let unlock = self.unlock();
+        if is_unlocked(unlock, sim.world.deliveries(), creative) {
+            return None;
+        }
+        let tier = &TIERS[tier_of(unlock)];
+        let needs: Vec<String> = tier
+            .requires
+            .iter()
+            .map(|&(kind, amount)| kind.quantity(amount as u32))
+            .collect();
+        Some(format!(
+            "verrouillé : palier « {} » (livrer {} au hub)",
+            tier.name,
+            needs.join(" et ")
+        ))
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             BuildTool::Building(kind) => kind.name(),
@@ -78,7 +124,7 @@ impl BuildTool {
             }
             BuildTool::Building(BuildingKind::Storage) => format!("{STORAGE_SLOTS} cases"),
             BuildTool::Building(BuildingKind::Pole) => format!("portée {POLE_RANGE_M:.0} m"),
-            BuildTool::Building(BuildingKind::Hub) => "accepte tout · objectifs".to_string(),
+            BuildTool::Building(BuildingKind::Hub) => "accepte tout · paliers".to_string(),
             BuildTool::Conveyor => format!(
                 "{}/min max · {CONVEYOR_MAX_LENGTH_M:.0} m max",
                 conveyor_max_rate_per_min()
@@ -109,7 +155,7 @@ impl BuildTool {
                 "Relie au réseau tout bâtiment à portée, et les autres poteaux."
             }
             BuildTool::Building(BuildingKind::Hub) => {
-                "Reçoit les livraisons (entrée à l'arrière) et suit tes objectifs."
+                "Reçoit les livraisons (entrée à l'arrière), qui débloquent les paliers."
             }
             BuildTool::Conveyor => {
                 "Relie une sortie (bloc jaune) à une entrée (bloc bleu). Deux clics."
@@ -170,17 +216,13 @@ pub struct Buildings(pub PlacedBuildings);
 #[derive(Resource, Debug, Default)]
 struct BuildingEntities(HashMap<BuildingId, Entity>);
 
-/// Rayon d'affichage des bâtiments autour du joueur, en mètres.
-pub const VIEW_LOAD_M: f32 = 150.0;
-/// Au-delà, l'affichage est déchargé (écart avec `VIEW_LOAD_M` : pas de clignotement).
-pub const VIEW_UNLOAD_M: f32 = 170.0;
-
 /// Faut-il charger (`Some(true)`) ou décharger (`Some(false)`) l'affichage d'un bâtiment
 /// à cette distance horizontale du joueur ? `None` : ne rien changer.
-pub fn visibility_change(distance: f32, loaded: bool) -> Option<bool> {
+/// `load_m` / `unload_m` : distances réglées dans les options (150 / 170 m par défaut).
+pub fn visibility_change(distance: f32, loaded: bool, load_m: f32, unload_m: f32) -> Option<bool> {
     match (loaded, distance) {
-        (false, d) if d <= VIEW_LOAD_M => Some(true),
-        (true, d) if d > VIEW_UNLOAD_M => Some(false),
+        (false, d) if d <= load_m => Some(true),
+        (true, d) if d > unload_m => Some(false),
         _ => None,
     }
 }
@@ -201,6 +243,17 @@ pub struct Preview {
     pub building: Option<PlacementPreview>,
     pub conveyor: Option<ConveyorPreview>,
     pub module: Option<ModulePreview>,
+    /// Prix de ce qui est visé (vide en mode créatif ou s'il n'y a rien à poser).
+    pub cost: Cost,
+    /// Verrouillé, ou pas assez de plaques : la pose est refusée pour cette raison.
+    pub blocked: Option<String>,
+}
+
+/// Résultat de la dernière pose ou du dernier démontage, affiché quelques secondes.
+#[derive(Resource, Debug, Default)]
+pub struct BuildFeedback {
+    pub text: String,
+    pub until: f32,
 }
 
 /// Rôle d'une pièce de modèle : certaines changent d'aspect selon l'état de la machine.
@@ -221,6 +274,7 @@ struct Part {
     mesh: Handle<Mesh>,
     material: Handle<StandardMaterial>,
     offset: Vec3,
+    rotation: Quat,
     role: PartRole,
 }
 
@@ -229,11 +283,16 @@ struct BuildingAssets {
     unit_cube: Handle<Mesh>,
     cable: Handle<Mesh>,
     belt: Handle<Mesh>,
+    belt_rail: Handle<Mesh>,
+    /// Flèche peinte sur le tapis, pointe vers -Z local (sens de déplacement).
+    chevron: Handle<Mesh>,
     item: Handle<Mesh>,
     parts: HashMap<BuildingKind, Vec<Part>>,
     foundation_material: Handle<StandardMaterial>,
     cable_material: Handle<StandardMaterial>,
     belt_material: Handle<StandardMaterial>,
+    rail_material: Handle<StandardMaterial>,
+    chevron_material: Handle<StandardMaterial>,
     item_materials: HashMap<ItemKind, Handle<StandardMaterial>>,
     light_active: Handle<StandardMaterial>,
     light_waiting: Handle<StandardMaterial>,
@@ -310,14 +369,38 @@ impl Plugin for BuildingPlugin {
             .init_resource::<BuildingEntities>()
             .init_resource::<Preview>()
             .init_resource::<StreamStats>()
+            .init_resource::<BuildFeedback>()
             .init_resource::<DemoRequested>()
+            .add_systems(Startup, setup_assets)
             .add_systems(
-                Startup,
-                (setup_assets, spawn_ghosts, spawn_hud, build_demo_scene).chain(),
+                OnEnter(Screen::InGame),
+                build_demo_scene.in_set(WorldSetup::Restore),
+            )
+            .add_systems(
+                OnEnter(Screen::InGame),
+                (spawn_ghosts, spawn_hud).in_set(WorldSetup::Spawn),
+            )
+            .add_systems(
+                OnExit(Screen::InGame),
+                (
+                    reset::<BuildMode>,
+                    reset::<Buildings>,
+                    reset::<BuildingEntities>,
+                    reset::<Preview>,
+                    reset::<StreamStats>,
+                    reset::<BuildFeedback>,
+                ),
             )
             .add_systems(
                 Update,
-                (rotate_key, update_preview, update_ghosts, place, remove)
+                (
+                    rotate_key,
+                    update_preview,
+                    check_cost,
+                    update_ghosts,
+                    place,
+                    remove,
+                )
                     .chain()
                     .after(update_target)
                     .run_if(in_state(PlayState::Running)),
@@ -335,7 +418,8 @@ impl Plugin for BuildingPlugin {
                     update_hud,
                 )
                     .chain()
-                    .after(remove),
+                    .after(remove)
+                    .run_if(in_state(Screen::InGame)),
             );
     }
 }
@@ -352,10 +436,19 @@ fn setup_assets(
             ..default()
         })
     };
+    // Émissions × `GLOW` : l'exposition « plein soleil » les assombrit sinon.
     let glow = |materials: &mut Assets<StandardMaterial>, color: Color, emissive: LinearRgba| {
         materials.add(StandardMaterial {
             base_color: color,
-            emissive,
+            emissive: emissive * GLOW,
+            ..default()
+        })
+    };
+    let metal = |materials: &mut Assets<StandardMaterial>, color: Color| {
+        materials.add(StandardMaterial {
+            base_color: color,
+            metallic: 0.8,
+            perceptual_roughness: 0.35,
             ..default()
         })
     };
@@ -368,17 +461,21 @@ fn setup_assets(
         })
     };
 
-    let orange = plain(&mut materials, Color::srgb(0.80, 0.45, 0.15));
-    let steel = plain(&mut materials, Color::srgb(0.35, 0.35, 0.38));
-    let output = plain(&mut materials, Color::srgb(0.95, 0.80, 0.20));
-    let input = plain(&mut materials, Color::srgb(0.20, 0.50, 0.95));
-    let blue_gray = plain(&mut materials, Color::srgb(0.30, 0.36, 0.45));
-    let copper = plain(&mut materials, Color::srgb(0.75, 0.45, 0.20));
-    let brick = plain(&mut materials, Color::srgb(0.55, 0.30, 0.22));
+    // Palette par famille (voir docs/visual-style.md) :
+    // extraction = orange, énergie = violet, transformation = brique,
+    // logistique = bois, livraison (hub) = blanc et or. Ports : bleu = entrée, jaune = sortie.
+    let orange = plain(&mut materials, Color::srgb(0.88, 0.47, 0.13));
+    let steel = plain(&mut materials, Color::srgb(0.36, 0.37, 0.40));
+    let silver = metal(&mut materials, Color::srgb(0.78, 0.79, 0.82));
+    let output = plain(&mut materials, Color::srgb(0.98, 0.80, 0.15));
+    let input = plain(&mut materials, Color::srgb(0.18, 0.48, 0.98));
+    let energy = plain(&mut materials, Color::srgb(0.38, 0.30, 0.66));
+    let energy_dark = plain(&mut materials, Color::srgb(0.22, 0.18, 0.40));
+    let brick = plain(&mut materials, Color::srgb(0.60, 0.29, 0.20));
     let wood = plain(&mut materials, Color::srgb(0.45, 0.32, 0.20));
-    let crate_wood = plain(&mut materials, Color::srgb(0.62, 0.47, 0.28));
-    let hub_base = plain(&mut materials, Color::srgb(0.22, 0.20, 0.30));
-    let hub_gold = plain(&mut materials, Color::srgb(0.85, 0.68, 0.25));
+    let crate_wood = plain(&mut materials, Color::srgb(0.66, 0.50, 0.29));
+    let hub_white = plain(&mut materials, Color::srgb(0.90, 0.89, 0.85));
+    let hub_gold = metal(&mut materials, Color::srgb(0.92, 0.72, 0.28));
     let light_active = glow(
         &mut materials,
         Color::srgb(0.2, 0.9, 0.3),
@@ -406,12 +503,23 @@ fn setup_assets(
         mesh,
         material: material.clone(),
         offset,
+        rotation: Quat::IDENTITY,
         role,
     };
-    let light_mesh = meshes.add(Sphere::new(0.2));
+    // Cylindre couché le long de l'axe X local (tambour de turbine).
+    let lying = |mesh: Handle<Mesh>, material: &Handle<StandardMaterial>, offset: Vec3| Part {
+        mesh,
+        material: material.clone(),
+        offset,
+        rotation: Quat::from_rotation_z(FRAC_PI_2),
+        role: PartRole::Plain,
+    };
+    let light_mesh = meshes.add(Sphere::new(0.24));
     // Ports : bloc jaune = sortie, bloc bleu = entrée (même position que dans `placement.rs`).
     let port_z = meshes.add(Cuboid::new(0.8, 0.8, 0.3));
     let mut parts = HashMap::new();
+    // Extracteur : bloc orange et colonne de forage à l'avant (le toit arrière porte
+    // les modules). Silhouette : une tour fine qui dépasse.
     parts.insert(
         BuildingKind::Extractor,
         vec![
@@ -422,9 +530,15 @@ fn setup_assets(
                 PartRole::Plain,
             ),
             part(
-                meshes.add(Cylinder::new(0.25, 0.7)),
+                meshes.add(Cylinder::new(0.2, 0.9)),
                 &steel,
-                Vec3::new(0.0, 1.75, 0.0),
+                Vec3::new(0.0, 1.85, -0.45),
+                PartRole::Plain,
+            ),
+            part(
+                meshes.add(Cylinder::new(0.42, 0.25)),
+                &orange,
+                Vec3::new(0.0, 1.55, -0.45),
                 PartRole::Plain,
             ),
             part(
@@ -436,36 +550,52 @@ fn setup_assets(
             part(
                 light_mesh.clone(),
                 &light_active,
-                Vec3::new(0.0, 2.1, 0.0),
+                Vec3::new(0.0, 2.35, -0.45),
                 PartRole::Light,
             ),
         ],
     );
+    // Générateur : caisson violet (énergie) et tambour argenté couché.
     parts.insert(
         BuildingKind::Generator,
         vec![
             part(
                 meshes.add(Cuboid::new(2.6, 1.5, 2.6)),
-                &blue_gray,
+                &energy,
                 Vec3::new(0.0, 0.75, 0.0),
                 PartRole::Plain,
             ),
             part(
-                meshes.add(Cylinder::new(0.8, 0.6)),
-                &copper,
-                Vec3::new(0.0, 1.8, 0.0),
+                meshes.add(Cuboid::new(2.0, 0.12, 1.4)),
+                &energy_dark,
+                Vec3::new(0.0, 1.56, 0.0),
                 PartRole::Plain,
             ),
+            lying(
+                meshes.add(Cylinder::new(0.42, 1.9)),
+                &silver,
+                Vec3::new(0.0, 1.98, 0.0),
+            ),
+            lying(
+                meshes.add(Cylinder::new(0.46, 0.12)),
+                &energy_dark,
+                Vec3::new(-0.6, 1.98, 0.0),
+            ),
+            lying(
+                meshes.add(Cylinder::new(0.46, 0.12)),
+                &energy_dark,
+                Vec3::new(0.6, 1.98, 0.0),
+            ),
             part(
-                meshes.add(Cylinder::new(0.1, 0.3)),
+                meshes.add(Cylinder::new(0.1, 0.5)),
                 &steel,
-                Vec3::new(0.0, 2.25, 0.0),
+                Vec3::new(0.95, 1.75, 0.95),
                 PartRole::Plain,
             ),
             part(
                 light_mesh.clone(),
                 &light_active,
-                Vec3::new(0.95, 1.7, -0.95),
+                Vec3::new(-0.95, 1.75, -0.95),
                 PartRole::Light,
             ),
         ],
@@ -546,13 +676,13 @@ fn setup_assets(
         vec![
             part(
                 meshes.add(Cuboid::new(2.8, 0.6, 2.8)),
-                &hub_base,
+                &hub_white,
                 Vec3::new(0.0, 0.3, 0.0),
                 PartRole::Plain,
             ),
             part(
                 meshes.add(Cylinder::new(0.45, 2.4)),
-                &hub_base,
+                &hub_white,
                 Vec3::new(0.0, 1.8, 0.0),
                 PartRole::Plain,
             ),
@@ -592,8 +722,8 @@ fn setup_assets(
                 PartRole::Plain,
             ),
             part(
-                meshes.add(Cuboid::new(0.12, 0.2, 0.12)),
-                &steel,
+                meshes.add(Cuboid::new(0.14, 0.22, 0.14)),
+                &energy,
                 Vec3::new(0.0, 4.05, 0.0),
                 PartRole::Plain,
             ),
@@ -614,11 +744,25 @@ fn setup_assets(
         unit_cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
         cable: meshes.add(Cuboid::new(0.05, 0.05, 1.0)),
         belt: meshes.add(Cuboid::new(0.6, 0.08, 1.0)),
+        belt_rail: meshes.add(Cuboid::new(0.06, 0.14, 1.0)),
+        chevron: meshes.add(Triangle3d::new(
+            Vec3::new(0.0, 0.0, -0.17),
+            Vec3::new(-0.2, 0.0, 0.11),
+            Vec3::new(0.2, 0.0, 0.11),
+        )),
         item: meshes.add(Cuboid::new(0.3, 0.2, 0.3)),
         parts,
-        foundation_material: plain(&mut materials, Color::srgb(0.62, 0.62, 0.60)),
-        cable_material: plain(&mut materials, Color::srgb(0.08, 0.08, 0.08)),
-        belt_material: plain(&mut materials, Color::srgb(0.18, 0.18, 0.20)),
+        foundation_material: plain(&mut materials, Color::srgb(0.52, 0.52, 0.50)),
+        // Câbles mats : sinon le reflet du ciel les rend beiges.
+        cable_material: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.05, 0.05, 0.05),
+            perceptual_roughness: 0.95,
+            reflectance: 0.1,
+            ..default()
+        }),
+        belt_material: plain(&mut materials, Color::srgb(0.16, 0.16, 0.18)),
+        rail_material: plain(&mut materials, Color::srgb(0.40, 0.41, 0.44)),
+        chevron_material: plain(&mut materials, Color::srgb(0.85, 0.68, 0.18)),
         item_materials,
         light_active,
         light_waiting,
@@ -703,7 +847,7 @@ fn spawn_ghosts(mut commands: Commands, assets: Res<BuildingAssets>) {
                         NotShadowCaster,
                         Mesh3d(part.mesh.clone()),
                         MeshMaterial3d(material.clone()),
-                        Transform::from_translation(part.offset),
+                        Transform::from_translation(part.offset).with_rotation(part.rotation),
                     ));
                     if matches!(part.role, PartRole::InputPort | PartRole::OutputPort) {
                         entity.insert(GhostPort);
@@ -826,6 +970,107 @@ fn update_preview(
     }
 }
 
+/// Verrou et prix de ce qui est visé : la pose est refusée s'il manque quelque chose.
+fn check_cost(
+    build: Res<BuildMode>,
+    session: Res<GameSession>,
+    sim: Res<Simulation>,
+    inventory: Res<PlayerInventory>,
+    mut preview: ResMut<Preview>,
+) {
+    if !build.active {
+        return;
+    }
+    if let Some(reason) = build.tool.locked_reason(&sim, session.creative) {
+        preview.blocked = Some(reason);
+        return;
+    }
+    if session.creative {
+        return;
+    }
+    let cost = match build.tool {
+        BuildTool::Building(kind) => building_cost(kind),
+        BuildTool::Module(kind) => module_cost(kind),
+        // Le prix d'un convoyeur dépend de sa longueur : connu une fois l'arrivée visée.
+        BuildTool::Conveyor => match &preview.conveyor {
+            Some(c) if c.to.is_some() => conveyor_cost(c.start.distance(c.end)),
+            _ => return,
+        },
+    };
+    let missing = tech::missing(&inventory.0, &cost);
+    if !missing.is_empty() {
+        preview.blocked = Some(format!(
+            "il manque {} (coût : {})",
+            describe(&missing),
+            describe(&cost)
+        ));
+    }
+    preview.cost = cost;
+}
+
+/// Objets contenus dans une machine (rendus au joueur quand on la démonte).
+fn machine_contents(machine: &Machine) -> Cost {
+    let mut items = Vec::new();
+    match machine {
+        Machine::Extractor(e) => items.push((e.output().kind(), e.output().count())),
+        Machine::Furnace(f) => {
+            for stack in [f.input().stack(), f.output().stack()]
+                .into_iter()
+                .flatten()
+            {
+                items.push((stack.kind, stack.count));
+            }
+        }
+        Machine::Storage(inventory) => {
+            for stack in inventory.slots().iter().flatten() {
+                items.push((stack.kind, stack.count));
+            }
+        }
+        Machine::Generator(_) | Machine::Pole | Machine::Hub => {}
+    }
+    items.retain(|&(_, count)| count > 0);
+    items
+}
+
+/// Objets d'un convoyeur et, hors mode créatif, son prix : ce que rend son démontage.
+fn conveyor_salvage(
+    sim: &SimWorld,
+    buildings: &PlacedBuildings,
+    id: BuildingId,
+    creative: bool,
+) -> Cost {
+    let Some(conveyor) = sim.conveyor(id) else {
+        return Vec::new();
+    };
+    let mut items: Cost = conveyor.items().map(|(kind, _)| (kind, 1)).collect();
+    if !creative && let Some((from, to)) = buildings.conveyor_ends(conveyor.from, conveyor.to) {
+        items.extend(conveyor_cost(from.distance(to)));
+    }
+    items
+}
+
+/// Rend `items` au joueur et prépare le message : « +10 plaques de fer ».
+fn give_back(inventory: &mut PlayerInventory, items: &[(ItemKind, u32)], what: &str) -> String {
+    // Regroupe par type pour un message lisible.
+    let mut merged: Cost = Vec::new();
+    for &(kind, count) in items {
+        match merged.iter_mut().find(|(k, _)| *k == kind) {
+            Some((_, n)) => *n += count,
+            None => merged.push((kind, count)),
+        }
+    }
+    let lost = tech::refund(&mut inventory.0, &merged);
+    let mut message = if merged.is_empty() {
+        format!("{what} démonté")
+    } else {
+        format!("{what} démonté : +{}", describe(&merged))
+    };
+    if !lost.is_empty() {
+        message.push_str(&format!(" · inventaire plein, perdu : {}", describe(&lost)));
+    }
+    message
+}
+
 fn update_ghosts(
     preview: Res<Preview>,
     assets: Res<BuildingAssets>,
@@ -861,8 +1106,9 @@ fn update_ghosts(
         ),
     >,
 ) {
+    let affordable = preview.blocked.is_none();
     let material_for = |ok: bool| {
-        if ok {
+        if ok && affordable {
             &assets.ghost_valid
         } else {
             &assets.ghost_invalid
@@ -942,12 +1188,23 @@ fn place(
     mut sim: ResMut<Simulation>,
     mut buildings: ResMut<Buildings>,
     mut entities: ResMut<BuildingEntities>,
+    mut inventory: ResMut<PlayerInventory>,
+    mut feedback: ResMut<BuildFeedback>,
+    time: Res<Time<Real>>,
 ) {
     if !build.active || !mouse.just_pressed(MouseButton::Left) {
         return;
     }
+    if let Some(reason) = &preview.blocked {
+        feedback.text = format!("Impossible : {reason}");
+        feedback.until = time.elapsed_secs() + 3.0;
+        return;
+    }
+    let cost = preview.cost.clone();
     match build.tool {
-        BuildTool::Conveyor => place_conveyor(&mut build, &preview, &target, &mut sim),
+        BuildTool::Conveyor => {
+            place_conveyor(&mut build, &preview, &target, &mut sim, &mut inventory)
+        }
         BuildTool::Module(kind) => {
             let Some(p) = &preview.module else {
                 return;
@@ -956,13 +1213,16 @@ fn place(
                 .result
                 .and_then(|()| sim.world.attach_module(p.host, p.socket, kind))
             {
-                Ok(id) => info!(
-                    "{} #{} fixé sur #{} (emplacement {})",
-                    kind.name(),
-                    id.0,
-                    p.host.0,
-                    p.socket + 1
-                ),
+                Ok(id) => {
+                    tech::pay(&mut inventory.0, &cost);
+                    info!(
+                        "{} #{} fixé sur #{} (emplacement {})",
+                        kind.name(),
+                        id.0,
+                        p.host.0,
+                        p.socket + 1
+                    );
+                }
                 Err(error) => info!("Module refusé : {}", error.message()),
             }
         }
@@ -987,6 +1247,7 @@ fn place(
                     None => return,
                 },
             };
+            tech::pay(&mut inventory.0, &cost);
             let entity = spawn_building(&mut commands, &assets, id, &building);
             entities.0.insert(id, entity);
             info!(
@@ -1003,7 +1264,13 @@ fn place(
 }
 
 /// Premier clic : choisir la sortie de départ. Second clic : choisir l'entrée d'arrivée.
-fn place_conveyor(build: &mut BuildMode, preview: &Preview, target: &Target, sim: &mut Simulation) {
+fn place_conveyor(
+    build: &mut BuildMode,
+    preview: &Preview,
+    target: &Target,
+    sim: &mut Simulation,
+    inventory: &mut PlayerInventory,
+) {
     match build.conveyor_from {
         None => {
             let Some(id) = target.0.building() else {
@@ -1027,6 +1294,7 @@ fn place_conveyor(build: &mut BuildMode, preview: &Preview, target: &Target, sim
             };
             match sim.world.add_conveyor(from, to, p.start.distance(p.end)) {
                 Ok(id) => {
+                    tech::pay(&mut inventory.0, &preview.cost);
                     info!(
                         "Convoyeur #{} posé de #{} vers #{} ({:.1} m)",
                         id.0,
@@ -1064,7 +1332,7 @@ fn spawn_building(
                 let mut entity = root.spawn((
                     Mesh3d(part.mesh.clone()),
                     MeshMaterial3d(part.material.clone()),
-                    Transform::from_translation(part.offset),
+                    Transform::from_translation(part.offset).with_rotation(part.rotation),
                 ));
                 match part.role {
                     PartRole::Light => {
@@ -1081,6 +1349,8 @@ fn spawn_building(
 }
 
 /// Clic droit : annule un convoyeur en cours, sinon démonte ce qui est visé.
+/// Le contenu revient dans l'inventaire et, hors mode créatif, le prix est remboursé
+/// (y compris les convoyeurs et modules qui partent avec un bâtiment).
 fn remove(
     mouse: Res<ButtonInput<MouseButton>>,
     mut build: ResMut<BuildMode>,
@@ -1089,6 +1359,10 @@ fn remove(
     mut sim: ResMut<Simulation>,
     mut buildings: ResMut<Buildings>,
     mut entities: ResMut<BuildingEntities>,
+    mut inventory: ResMut<PlayerInventory>,
+    mut feedback: ResMut<BuildFeedback>,
+    session: Res<GameSession>,
+    time: Res<Time<Real>>,
 ) {
     if !build.active || !mouse.just_pressed(MouseButton::Right) {
         return;
@@ -1097,54 +1371,64 @@ fn remove(
         info!("Convoyeur annulé");
         return;
     }
-    match target.0 {
+    let creative = session.creative;
+    let message = match target.0 {
         Aim::Module { id, .. } => {
-            if let Some(module) = sim.world.detach_module(id) {
-                info!(
-                    "{} retiré de #{} (contenu de la machine conservé)",
-                    module.kind.name(),
-                    module.host.0
-                );
-            }
+            let Some(module) = sim.world.detach_module(id) else {
+                return;
+            };
+            let refund = if creative {
+                Vec::new()
+            } else {
+                module_cost(module.kind)
+            };
+            give_back(&mut inventory, &refund, module.kind.name())
         }
         Aim::Conveyor { id, .. } => {
-            if let Some(conveyor) = sim.world.remove_conveyor(id) {
-                info!(
-                    "Convoyeur #{} démonté ({} objets perdus, mode créatif)",
-                    id.0,
-                    conveyor.len()
-                );
+            let salvage = conveyor_salvage(&sim.world, &buildings.0, id, creative);
+            if sim.world.remove_conveyor(id).is_none() {
+                return;
             }
+            give_back(&mut inventory, &salvage, "Convoyeur")
         }
         Aim::Building { id, .. } => {
-            let removed = sim.world.remove(id);
+            let Some(building) = sim.world.building(id) else {
+                return;
+            };
+            let kind = building.machine.kind();
+            let mut salvage = machine_contents(&building.machine);
+            if !creative {
+                salvage.extend(building_cost(kind));
+                for (_, module) in sim.world.modules_of(id) {
+                    salvage.extend(module_cost(module.kind));
+                }
+            }
+            let attached: Vec<BuildingId> = sim
+                .world
+                .conveyors()
+                .filter(|(_, c)| c.from == id || c.to == id)
+                .map(|(cid, _)| cid)
+                .collect();
+            for conveyor in attached {
+                salvage.extend(conveyor_salvage(
+                    &sim.world,
+                    &buildings.0,
+                    conveyor,
+                    creative,
+                ));
+            }
+            sim.world.remove(id);
             buildings.0.remove(id);
             if let Some(entity) = entities.0.remove(&id) {
                 commands.entity(entity).despawn();
             }
-            if let Some(building) = removed {
-                let lost = match &building.machine {
-                    Machine::Extractor(e) => e.output().count(),
-                    Machine::Furnace(f) => f.input().count() + f.output().count(),
-                    Machine::Storage(inventory) => {
-                        ItemKind::ALL.iter().map(|k| inventory.count(*k)).sum()
-                    }
-                    _ => 0,
-                };
-                info!(
-                    "{} #{} démonté{}",
-                    building.machine.kind().name(),
-                    id.0,
-                    if lost > 0 {
-                        format!(" ({lost} objets perdus, mode créatif)")
-                    } else {
-                        String::new()
-                    }
-                );
-            }
+            give_back(&mut inventory, &salvage, kind.name())
         }
         _ => return,
-    }
+    };
+    info!("{message}");
+    feedback.text = message;
+    feedback.until = time.elapsed_secs() + 3.0;
     target.0 = Aim::Nothing;
 }
 
@@ -1152,13 +1436,17 @@ fn remove(
 fn update_status_parts(
     sim: Res<Simulation>,
     assets: Res<BuildingAssets>,
+    time: Res<Time<Real>>,
     mut lights: Query<(&StatusLight, &mut MeshMaterial3d<StandardMaterial>), Without<FurnaceMouth>>,
     mut mouths: Query<(&FurnaceMouth, &mut MeshMaterial3d<StandardMaterial>), Without<StatusLight>>,
 ) {
+    let blink_on = (time.elapsed_secs() * 1.5).fract() < 0.6;
     let state_light = |state: MachineState| match state {
         MachineState::Active => &assets.light_active,
         MachineState::WaitingInput | MachineState::OutputFull => &assets.light_waiting,
-        MachineState::NoPower => &assets.light_no_power,
+        // Clignote : une panne de courant doit se repérer de loin.
+        MachineState::NoPower if blink_on => &assets.light_no_power,
+        MachineState::NoPower => &assets.light_off,
         MachineState::Off => &assets.light_off,
     };
     for (StatusLight(id), mut material) in &mut lights {
@@ -1292,12 +1580,48 @@ fn sync_conveyors(
                 Transform::from_translation((from + to) / 2.0).looking_at(to, Vec3::Y),
                 Visibility::default(),
             ))
-            .with_child((
-                Mesh3d(assets.belt.clone()),
-                MeshMaterial3d(assets.belt_material.clone()),
-                Transform::from_scale(Vec3::new(1.0, 1.0, length)),
-            ));
+            .with_children(|belt| {
+                belt.spawn((
+                    Mesh3d(assets.belt.clone()),
+                    MeshMaterial3d(assets.belt_material.clone()),
+                    Transform::from_scale(Vec3::new(1.0, 1.0, length)),
+                ));
+                for side in [-0.33, 0.33] {
+                    belt.spawn((
+                        Mesh3d(assets.belt_rail.clone()),
+                        MeshMaterial3d(assets.rail_material.clone()),
+                        Transform::from_xyz(side, 0.03, 0.0)
+                            .with_scale(Vec3::new(1.0, 1.0, length)),
+                    ));
+                }
+                // Flèches peintes : le sens du tapis se lit même quand il est vide.
+                for z in chevron_offsets(length) {
+                    belt.spawn((
+                        NotShadowCaster,
+                        Mesh3d(assets.chevron.clone()),
+                        MeshMaterial3d(assets.chevron_material.clone()),
+                        Transform::from_xyz(0.0, 0.045, z),
+                    ));
+                }
+            });
     }
+}
+
+/// Espacement des flèches peintes sur les tapis, en mètres.
+const CHEVRON_SPACING_M: f32 = 1.5;
+
+/// Positions (z local, la racine regarde vers -Z) des flèches d'un tapis de `length` m :
+/// régulières, centrées, à distance des deux extrémités.
+fn chevron_offsets(length: f32) -> Vec<f32> {
+    let usable = length - 1.0;
+    if usable <= 0.0 {
+        return Vec::new();
+    }
+    let count = (usable / CHEVRON_SPACING_M).floor() as usize + 1;
+    let span = (count - 1) as f32 * CHEVRON_SPACING_M;
+    (0..count)
+        .map(|i| span / 2.0 - i as f32 * CHEVRON_SPACING_M)
+        .collect()
 }
 
 /// Place les cubes d'objets le long des tapis, d'après leur avancement dans la simulation.
@@ -1350,6 +1674,10 @@ fn update_hud(
     preview: Res<Preview>,
     deposits: Res<Deposits>,
     sim: Res<Simulation>,
+    session: Res<GameSession>,
+    inventory: Res<PlayerInventory>,
+    feedback: Res<BuildFeedback>,
+    time: Res<Time<Real>>,
     hud: Single<(&mut Text, &mut Visibility), With<BuildHud>>,
 ) {
     let (mut text, mut visibility) = hud.into_inner();
@@ -1456,9 +1784,29 @@ fn update_hud(
             (title, status)
         }
     };
+    // Verrou ou plaques manquantes : prime sur le reste.
+    let status = match &preview.blocked {
+        Some(reason) => format!("Impossible : {reason}"),
+        None => status,
+    };
+    let price = if session.creative {
+        "gratuit (créatif)".to_string()
+    } else {
+        let iron = inventory.0.count(ItemKind::IronPlate);
+        let copper = inventory.0.count(ItemKind::CopperPlate);
+        format!(
+            "coût : {} · tu as {iron} fer, {copper} cuivre",
+            build.tool.cost_label()
+        )
+    };
+    let recent = if time.elapsed_secs() < feedback.until {
+        format!("\n{}", feedback.text)
+    } else {
+        String::new()
+    };
     text.0 = format!(
-        "{title}\n{status}\n\
-         Clic gauche : poser · R : tourner · Clic droit : démonter · B : menu · Échap : arrêter"
+        "{title}\n{price}\n{status}{recent}\n\
+         Clic gauche : poser · R : tourner · Clic droit : démonter (remboursé) · B : menu · Échap : arrêter"
     );
 }
 
@@ -1549,6 +1897,7 @@ fn update_module_indicators(
 /// continue de produire, et son affichage est recréé à l'identique au retour du joueur.
 fn stream_buildings(
     player: Single<&Transform, With<Player>>,
+    settings: Res<Settings>,
     buildings: Res<Buildings>,
     assets: Res<BuildingAssets>,
     mut entities: ResMut<BuildingEntities>,
@@ -1559,7 +1908,12 @@ fn stream_buildings(
     let mut changed = false;
     for (id, building) in buildings.0.iter() {
         let distance = (building.x - p.x).hypot(building.z - p.z);
-        match visibility_change(distance, entities.0.contains_key(&id)) {
+        match visibility_change(
+            distance,
+            entities.0.contains_key(&id),
+            settings.view_distance_m as f32,
+            settings.view_unload_m(),
+        ) {
             Some(true) => {
                 let entity = spawn_building(&mut commands, &assets, id, building);
                 entities.0.insert(id, entity);
@@ -1585,14 +1939,15 @@ fn stream_buildings(
 /// Construit la scène de démonstration au lancement si `--demo` est passé.
 /// L'affichage suit tout seul : `stream_buildings` crée les entités des bâtiments proches.
 fn build_demo_scene(
-    demo: Res<DemoRequested>,
+    mut demo: ResMut<DemoRequested>,
     terrain: Res<Terrain>,
     deposits: Res<Deposits>,
     rocks: Res<Rocks>,
     mut sim: ResMut<Simulation>,
     mut buildings: ResMut<Buildings>,
 ) {
-    if !demo.0 {
+    // Une seule fois : un monde créé ensuite depuis l'écran titre reste vide.
+    if !std::mem::take(&mut demo.0) {
         return;
     }
     match crate::scene::build_demo(
@@ -1615,19 +1970,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn chevrons_are_centred_and_stay_away_from_the_ends() {
+        assert!(chevron_offsets(0.8).is_empty());
+        assert_eq!(chevron_offsets(1.2), vec![0.0]);
+        let offsets = chevron_offsets(10.0);
+        assert_eq!(offsets.len(), 7);
+        assert!((offsets[0] + offsets[6]).abs() < 1e-5, "centrées");
+        assert!(offsets.iter().all(|z| z.abs() <= 10.0 / 2.0 - 0.5));
+    }
+
+    #[test]
     fn display_loads_near_and_unloads_far_with_hysteresis() {
-        assert_eq!(visibility_change(100.0, false), Some(true));
+        // Distances par défaut des options : 150 m pour charger, 170 m pour décharger.
+        let defaults = Settings::default();
+        let (load, unload) = (defaults.view_distance_m as f32, defaults.view_unload_m());
+        assert_eq!(visibility_change(100.0, false, load, unload), Some(true));
         assert_eq!(
-            visibility_change(160.0, false),
+            visibility_change(160.0, false, load, unload),
             None,
             "entre les deux : pas encore"
         );
         assert_eq!(
-            visibility_change(160.0, true),
+            visibility_change(160.0, true, load, unload),
             None,
             "entre les deux : on garde"
         );
-        assert_eq!(visibility_change(200.0, true), Some(false));
-        assert_eq!(visibility_change(100.0, true), None);
+        assert_eq!(visibility_change(200.0, true, load, unload), Some(false));
+        assert_eq!(visibility_change(100.0, true, load, unload), None);
     }
 }

@@ -5,6 +5,10 @@
 //! continue : on voit les machines travailler en direct. Les cases se manipulent au
 //! **glisser-déposer**. Une aide contextuelle s'affiche aussi sous le réticule.
 
+mod screens;
+
+pub use screens::ScreensPlugin;
+
 use bevy::picking::Pickable;
 use bevy::picking::events::{PointerDragDrop, PointerDragEnd, PointerDragStart};
 use bevy::picking::hover::Hovered;
@@ -15,16 +19,38 @@ use bevy::window::PrimaryWindow;
 
 use crate::app::PlayState;
 use crate::building::{BuildMode, BuildTool};
+use crate::game::GameSession;
+use crate::game::{Screen, WorldSetup, reset};
 use crate::interaction::{Aim, Target};
 use crate::inventory::{Inventory, ItemKind, move_between, take_from_slot, transfer};
 use crate::player::{INVENTORY_SLOTS, PlayerInventory};
 use crate::simulation::Simulation;
 use crate::simulation::energy::{GENERATOR_POWER_W, POLE_RANGE_M};
-use crate::simulation::hub::GOALS;
 use crate::simulation::logistics::conveyor_max_rate_per_min;
 use crate::simulation::modules::{MachineStats, Module};
 use crate::simulation::sim_world::{BuildingId, BuildingKind, Machine, STORAGE_SLOTS, SimWorld};
+use crate::simulation::tech::{TIERS, Tier, tier_reached};
 use crate::world::Deposits;
+
+/// Police de l'interface : Fira Sans complète (accents, symboles), embarquée dans le
+/// binaire. La police par défaut de Bevy n'est qu'un sous-ensemble ASCII de Fira Mono :
+/// « électrique » s'y affichait « �lectrique ».
+const UI_FONT: &[u8] = include_bytes!("../../assets/fonts/FiraSans-Regular.ttf");
+
+/// Ombre portée discrète sous les textes posés sur la scène 3D.
+pub fn text_shadow() -> TextShadow {
+    TextShadow {
+        offset: Vec2::splat(1.5),
+        color: Color::srgba(0.0, 0.0, 0.0, 0.8),
+    }
+}
+
+/// Remplace la police par défaut (même identifiant d'asset) : tous les textes en héritent.
+fn install_ui_font(mut fonts: ResMut<Assets<Font>>) {
+    if let Err(error) = fonts.insert(AssetId::default(), Font::from_bytes(UI_FONT.to_vec())) {
+        warn!("Police de l'interface non installée : {error:?}");
+    }
+}
 
 const COLUMNS: usize = 9;
 const SLOT_PX: f32 = 52.0;
@@ -38,6 +64,18 @@ const CARD_IDLE: Color = Color::srgb(0.14, 0.16, 0.20);
 const CARD_HOVER: Color = Color::srgb(0.20, 0.24, 0.30);
 const ACCENT: Color = Color::srgb(0.55, 0.85, 0.60);
 const MUTED: Color = Color::srgb(0.70, 0.72, 0.76);
+const LOCKED_CARD: Color = Color::srgb(0.10, 0.11, 0.13);
+const LOCKED_TEXT: Color = Color::srgb(0.95, 0.65, 0.45);
+const PRICE_TEXT: Color = Color::srgb(0.95, 0.85, 0.55);
+
+/// Première lettre en majuscule.
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
 
 /// Menu actuellement ouvert.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +155,7 @@ struct ToggleLabel;
 #[derive(Component)]
 struct ModulesInfo;
 
-/// Suivi d'objectif, en haut à droite.
+/// Progression du palier suivant, en haut à droite.
 #[derive(Component)]
 struct GoalTracker;
 
@@ -125,7 +163,7 @@ struct GoalTracker;
 #[derive(Component)]
 struct HelpPanel;
 
-/// Notification temporaire (objectif atteint).
+/// Notification temporaire (palier débloqué).
 #[derive(Component)]
 struct Toast;
 
@@ -139,7 +177,7 @@ struct RebuildMenu(bool);
 
 /// Carte du menu de construction (fond différent des boutons).
 #[derive(Component)]
-struct Card;
+pub(crate) struct Card;
 
 #[derive(Component)]
 struct Prompt;
@@ -153,22 +191,46 @@ impl Plugin for MenuPlugin {
             .init_resource::<Dragging>()
             .init_resource::<RebuildMenu>()
             .init_resource::<ToastUntil>()
-            .add_systems(Startup, (spawn_prompt, spawn_goal_hud, spawn_help))
-            .add_systems(Update, (update_goal_hud, toggle_help))
+            .add_systems(PreStartup, install_ui_font)
+            .add_systems(
+                OnEnter(Screen::InGame),
+                (
+                    spawn_prompt,
+                    spawn_goal_hud,
+                    spawn_help,
+                    init_announced_tier,
+                )
+                    .in_set(WorldSetup::Spawn),
+            )
+            .add_systems(
+                OnExit(Screen::InGame),
+                (
+                    reset::<OpenMenu>,
+                    reset::<PanelMessage>,
+                    reset::<Dragging>,
+                    reset::<RebuildMenu>,
+                    reset::<ToastUntil>,
+                ),
+            )
+            .add_systems(
+                Update,
+                (update_goal_hud, toggle_help, update_prompt).run_if(in_state(Screen::InGame)),
+            )
             .add_systems(Update, open_menu.run_if(in_state(PlayState::Running)))
             .add_systems(
                 Update,
-                (
-                    close_menu,
-                    rebuild_menu,
-                    update_menu,
-                    style_buttons,
-                    follow_cursor,
-                )
+                (close_menu, rebuild_menu, update_menu, follow_cursor)
                     .chain()
                     .run_if(in_state(PlayState::Menu)),
             )
-            .add_systems(Update, update_prompt)
+            .add_systems(
+                Update,
+                style_buttons.run_if(
+                    in_state(PlayState::Menu)
+                        .or_else(in_state(PlayState::Paused))
+                        .or_else(in_state(Screen::Title)),
+                ),
+            )
             .add_systems(OnEnter(PlayState::Menu), spawn_menu)
             .add_systems(OnExit(PlayState::Menu), despawn_menu);
     }
@@ -335,8 +397,9 @@ fn spawn_menu(
     menu: Res<OpenMenu>,
     sim: Res<Simulation>,
     build: Res<BuildMode>,
+    session: Res<GameSession>,
 ) {
-    spawn_menu_ui(&mut commands, *menu, &sim, &build);
+    spawn_menu_ui(&mut commands, *menu, &sim, &build, session.creative);
 }
 
 /// Reconstruit le menu ouvert (la liste des modules a changé).
@@ -347,6 +410,7 @@ fn rebuild_menu(
     menu: Res<OpenMenu>,
     sim: Res<Simulation>,
     build: Res<BuildMode>,
+    session: Res<GameSession>,
 ) {
     if !std::mem::take(&mut rebuild.0) {
         return;
@@ -354,10 +418,16 @@ fn rebuild_menu(
     for root in &roots {
         commands.entity(root).despawn();
     }
-    spawn_menu_ui(&mut commands, *menu, &sim, &build);
+    spawn_menu_ui(&mut commands, *menu, &sim, &build, session.creative);
 }
 
-fn spawn_menu_ui(commands: &mut Commands, menu: OpenMenu, sim: &Simulation, build: &BuildMode) {
+fn spawn_menu_ui(
+    commands: &mut Commands,
+    menu: OpenMenu,
+    sim: &Simulation,
+    build: &BuildMode,
+    creative: bool,
+) {
     let kind = match menu {
         OpenMenu::Machine(id) => sim.world.building(id).map(|b| b.machine.kind()),
         _ => None,
@@ -393,7 +463,7 @@ fn spawn_menu_ui(commands: &mut Commands, menu: OpenMenu, sim: &Simulation, buil
             ))
             .with_children(|panel| {
                 if menu == OpenMenu::Build {
-                    spawn_build_menu(panel, build);
+                    spawn_build_menu(panel, build, sim, creative);
                     return;
                 }
                 if let Some(kind) = kind {
@@ -443,7 +513,14 @@ fn spawn_menu_ui(commands: &mut Commands, menu: OpenMenu, sim: &Simulation, buil
         });
 }
 
-fn spawn_build_menu(panel: &mut ChildSpawnerCommands, build: &BuildMode) {
+/// Menu de construction : une carte par outil, avec son prix ; les outils verrouillés
+/// indiquent le palier à atteindre et ne se sélectionnent pas.
+fn spawn_build_menu(
+    panel: &mut ChildSpawnerCommands,
+    build: &BuildMode,
+    sim: &Simulation,
+    creative: bool,
+) {
     panel.spawn(text("Construction", 20.0, Color::WHITE));
     panel
         .spawn(Node {
@@ -456,11 +533,8 @@ fn spawn_build_menu(panel: &mut ChildSpawnerCommands, build: &BuildMode) {
         .with_children(|grid| {
             for tool in BuildTool::ALL {
                 let selected = build.active && build.tool == tool;
-                grid.spawn((
-                    PanelButton(Action::Select(tool)),
-                    Card,
-                    Button,
-                    Hovered::default(),
+                let locked = tool.locked_reason(sim, creative);
+                let mut card = grid.spawn((
                     Node {
                         flex_direction: FlexDirection::Column,
                         row_gap: Val::Px(4.0),
@@ -469,13 +543,46 @@ fn spawn_build_menu(panel: &mut ChildSpawnerCommands, build: &BuildMode) {
                         border_radius: BorderRadius::all(Val::Px(8.0)),
                         ..default()
                     },
-                    BackgroundColor(CARD_IDLE),
+                    BackgroundColor(if locked.is_some() {
+                        LOCKED_CARD
+                    } else {
+                        CARD_IDLE
+                    }),
                     BorderColor::all(if selected { ACCENT } else { SLOT_BORDER }),
-                ))
-                .observe(on_button)
-                .with_children(|card| {
-                    card.spawn((text(tool.name(), 17.0, Color::WHITE), Pickable::IGNORE));
-                    card.spawn((text(tool.stats(), 14.0, ACCENT), Pickable::IGNORE));
+                ));
+                if locked.is_none() {
+                    card.insert((
+                        PanelButton(Action::Select(tool)),
+                        Card,
+                        Button,
+                        Hovered::default(),
+                    ))
+                    .observe(on_button);
+                }
+                card.with_children(|card| {
+                    let name_color = if locked.is_some() {
+                        MUTED
+                    } else {
+                        Color::WHITE
+                    };
+                    card.spawn((text(tool.name(), 17.0, name_color), Pickable::IGNORE));
+                    match &locked {
+                        Some(reason) => {
+                            card.spawn((
+                                text(capitalize(reason), 13.0, LOCKED_TEXT),
+                                Pickable::IGNORE,
+                            ));
+                        }
+                        None => {
+                            card.spawn((text(tool.stats(), 14.0, ACCENT), Pickable::IGNORE));
+                        }
+                    }
+                    let price = if creative {
+                        "Gratuit (créatif)".to_string()
+                    } else {
+                        format!("Coût : {}", tool.cost_label())
+                    };
+                    card.spawn((text(price, 13.0, PRICE_TEXT), Pickable::IGNORE));
                     card.spawn((text(tool.description(), 13.0, MUTED), Pickable::IGNORE));
                 });
             }
@@ -846,32 +953,66 @@ fn power_line(world: &SimWorld, id: BuildingId, consumer: bool) -> String {
     )
 }
 
-/// Ligne d'objectif : « Objectif 2/5 : 23/50 plaques de cuivre ».
-fn goal_line(world: &SimWorld) -> String {
+/// Objets à livrer d'un palier : « 23/50 plaques de cuivre · 120/300 plaques de fer ».
+fn tier_progress(world: &SimWorld, tier: &Tier) -> String {
     let deliveries = world.deliveries();
-    match deliveries.current_goal() {
-        Some((index, goal)) => format!(
-            "Objectif {}/{} : livrer {} ({}/{})",
-            index + 1,
-            GOALS.len(),
-            goal.kind.quantity(goal.amount as u32),
-            deliveries.total(goal.kind).min(goal.amount),
-            goal.amount
-        ),
-        None => format!(
-            "Tous les objectifs sont atteints ({}/{}) !",
-            GOALS.len(),
-            GOALS.len()
-        ),
+    tier.requires
+        .iter()
+        .map(|&(kind, amount)| {
+            let plural = kind.quantity(2);
+            let unit = plural.split_once(' ').map_or("", |(_, unit)| unit);
+            format!("{}/{amount} {unit}", deliveries.total(kind).min(amount))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// Ce que débloque un palier : « Convoyeur », ou « rien de plus pour l'instant ».
+fn tier_unlocks(tier: &Tier) -> String {
+    if tier.unlocks.is_empty() {
+        "rien de plus pour l'instant".into()
+    } else {
+        tier.unlocks
+            .iter()
+            .map(|u| u.name())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
-/// Suivi d'objectif en haut à droite et notification temporaire au centre.
+/// Ligne de progression : prochain palier, livraisons, ce qu'il débloque.
+fn goal_line(world: &SimWorld, creative: bool) -> String {
+    if creative {
+        return "Mode créatif : tout est débloqué, construction gratuite".into();
+    }
+    let reached = tier_reached(world.deliveries());
+    let last = TIERS.len() - 1;
+    match TIERS.get(reached + 1) {
+        Some(tier) => format!(
+            "Palier {}/{last} « {} » : livrer au hub {}\n→ débloque : {}",
+            reached + 1,
+            tier.name,
+            tier_progress(world, tier),
+            tier_unlocks(tier)
+        ),
+        None => format!("Tous les paliers sont débloqués ({last}/{last}) !"),
+    }
+}
+
+/// Palier déjà annoncé : pas de notification pour ce qui était débloqué au chargement.
+#[derive(Resource, Debug, Default)]
+struct AnnouncedTier(usize);
+
+fn init_announced_tier(mut commands: Commands, sim: Res<Simulation>) {
+    commands.insert_resource(AnnouncedTier(tier_reached(sim.world.deliveries())));
+}
+
+/// Progression des paliers en haut à droite et notification temporaire au centre.
 fn spawn_goal_hud(mut commands: Commands) {
     commands.spawn((
         GoalTracker,
         text("", 15.0, Color::WHITE),
-        TextShadow::default(),
+        text_shadow(),
         Node {
             position_type: PositionType::Absolute,
             top: Val::Px(10.0),
@@ -894,7 +1035,7 @@ fn spawn_goal_hud(mut commands: Commands) {
         .with_child((
             Toast,
             text("", 22.0, ACCENT),
-            TextShadow::default(),
+            text_shadow(),
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
             Node {
                 padding: UiRect::axes(Val::Px(18.0), Val::Px(10.0)),
@@ -908,28 +1049,34 @@ fn spawn_goal_hud(mut commands: Commands) {
 
 fn update_goal_hud(
     sim: Res<Simulation>,
+    session: Res<GameSession>,
     time: Res<Time>,
-    mut last_reached: Local<usize>,
+    mut announced: ResMut<AnnouncedTier>,
     mut until: ResMut<ToastUntil>,
     mut tracker: Single<&mut Text, (With<GoalTracker>, Without<Toast>)>,
     toast: Single<(&mut Text, &mut Visibility), (With<Toast>, Without<GoalTracker>)>,
 ) {
-    let wanted = goal_line(&sim.world);
+    let wanted = goal_line(&sim.world, session.creative);
     if tracker.0 != wanted {
         tracker.0 = wanted;
     }
 
     let (mut toast_text, mut visibility) = toast.into_inner();
-    let reached = sim.world.deliveries().goals_reached();
-    if reached > *last_reached {
-        let goal = GOALS[reached - 1];
-        toast_text.0 = format!(
-            "Objectif atteint : {} livrées !",
-            goal.kind.quantity(goal.amount as u32)
-        );
+    let reached = tier_reached(sim.world.deliveries());
+    if reached > announced.0 {
+        let tier = &TIERS[reached];
+        toast_text.0 = if session.creative {
+            format!("Palier « {} » atteint !", tier.name)
+        } else {
+            format!(
+                "Palier « {} » débloqué : {} !",
+                tier.name,
+                tier_unlocks(tier)
+            )
+        };
         info!("{}", toast_text.0);
-        until.0 = time.elapsed_secs() + 5.0;
-        *last_reached = reached;
+        until.0 = time.elapsed_secs() + 6.0;
+        announced.0 = reached;
     }
     let show = time.elapsed_secs() < until.0;
     let wanted = if show {
@@ -1049,7 +1196,7 @@ fn machine_info(world: &SimWorld, deposits: &Deposits, id: BuildingId) -> String
                 id.0,
                 deliveries.grand_total(),
                 deliveries.per_minute(now),
-                goal_line(world),
+                goal_line(world, false),
                 if totals.is_empty() {
                     "rien pour l'instant".to_string()
                 } else {
@@ -1231,14 +1378,24 @@ fn follow_cursor(
 }
 
 fn style_buttons(
-    mut buttons: Query<(&Hovered, &mut BackgroundColor, Has<Card>), Changed<Hovered>>,
+    mut buttons: Query<
+        (
+            &Hovered,
+            &mut BackgroundColor,
+            Has<Card>,
+            Has<screens::Danger>,
+        ),
+        Changed<Hovered>,
+    >,
 ) {
-    for (hovered, mut background, is_card) in &mut buttons {
-        background.0 = match (hovered.get(), is_card) {
-            (true, true) => CARD_HOVER,
-            (false, true) => CARD_IDLE,
-            (true, false) => BUTTON_HOVER,
-            (false, false) => BUTTON_IDLE,
+    for (hovered, mut background, is_card, danger) in &mut buttons {
+        background.0 = match (hovered.get(), is_card, danger) {
+            (true, _, true) => screens::DANGER_HOVER,
+            (false, _, true) => screens::DANGER_IDLE,
+            (true, true, _) => CARD_HOVER,
+            (false, true, _) => CARD_IDLE,
+            (true, false, _) => BUTTON_HOVER,
+            (false, false, _) => BUTTON_IDLE,
         };
     }
 }
@@ -1261,7 +1418,7 @@ fn spawn_prompt(mut commands: Commands) {
         .with_child((
             Prompt,
             text("", 15.0, Color::WHITE),
-            TextShadow::default(),
+            text_shadow(),
             Pickable::IGNORE,
         ));
 }
@@ -1329,8 +1486,17 @@ V : marche / vol · Échap : pause (ou arrêter de construire) · Maj + Échap :
 
 CONSTRUIRE
 B : menu de construction · Clic gauche : poser · Clic droit : démonter
-R : tourner · Convoyeur : sortie jaune, puis entrée bleue
+R : tourner · Convoyeur : sortie jaune, puis entrée bleue (flèches = sens)
 Modules : vise une machine, ils se posent sur le toit
+Chaque pose coûte des plaques (remboursées au démontage) ; mode créatif : gratuit
+
+PROGRESSION
+Livre des plaques au hub pour débloquer les paliers (en haut à droite)
+Logistique : convoyeurs · Accélération : module de vitesse · Rendement : module d'efficacité
+
+PARTIE
+F5 : sauvegarder · sauvegarde automatique toutes les 2 min et en quittant
+Échap : pause, puis « revenir au menu » pour changer de monde
 
 INTERAGIR
 E : ouvrir la machine visée · Tab : inventaire (glisser-déposer)
@@ -1338,12 +1504,16 @@ Clic gauche hors construction : détruire un rocher
 
 VOYANTS
 Vert : actif · Orange : en attente ou sortie pleine
-Rouge : sans énergie · Gris : éteint
+Rouge clignotant : sans énergie · Gris : éteint
 Fantôme vert : pose possible · rouge : impossible (motif en bas)
+
+COULEURS
+Orange : extraction · Violet : énergie · Brique : fours
+Bois : stockage · Blanc et or : hub de livraison
 
 OUTILS DE TEST
 T : vitesse du temps ×1 / ×10 / ×100 · G : +50 minerais de fer et de cuivre
-I / O : remplir / vider la machine visée · F3 : overlay debug
+I / O : remplir / vider la machine visée · F3 : overlay debug · F12 : capture
 
 H : fermer l'aide";
 
@@ -1351,7 +1521,7 @@ H : fermer l'aide";
 fn spawn_help(mut commands: Commands) {
     commands.spawn((
         text("H : aide", 14.0, MUTED),
-        TextShadow::default(),
+        text_shadow(),
         Node {
             position_type: PositionType::Absolute,
             bottom: Val::Px(10.0),

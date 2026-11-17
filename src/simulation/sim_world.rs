@@ -14,13 +14,14 @@ use super::modules::{MachineStats, Module, ModuleError, ModuleKind};
 use super::production::{Extractor, Furnace};
 use crate::inventory::{Inventory, ItemKind};
 use crate::world::deposits::{Deposit, DepositId};
+use serde::{Deserialize, Serialize};
 
 /// Identifiant stable d'un bâtiment (jamais réutilisé, à sauvegarder en V0.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct BuildingId(pub u64);
 
 /// Types de bâtiments constructibles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BuildingKind {
     Extractor,
     Generator,
@@ -86,12 +87,12 @@ impl BuildingKind {
 pub const STORAGE_SLOTS: usize = 18;
 
 /// Générateur : fournit une puissance fixe tant qu'il est allumé (pas de carburant en V0).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Generator {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Machine {
     Extractor(Extractor),
     Generator(Generator),
@@ -177,7 +178,7 @@ impl Machine {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Building {
     /// Centre horizontal (x, z) : sert aux connexions électriques.
     pub x: f32,
@@ -213,7 +214,7 @@ impl ConveyorError {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SimWorld {
     clock: SimClock,
     next_building: u64,
@@ -223,10 +224,13 @@ pub struct SimWorld {
     conveyors: BTreeMap<BuildingId, Conveyor>,
     /// Modules fixés sur les machines, même espace d'identifiants.
     modules: BTreeMap<BuildingId, Module>,
-    /// Livraisons cumulées de tous les hubs (objectifs).
+    /// Livraisons cumulées de tous les hubs (paliers de l'arbre techno).
     deliveries: Deliveries,
+    /// Recalculé au chargement (`after_load`) : jamais sauvegardé.
+    #[serde(skip)]
     grid: PowerGrid,
     /// Incrémenté à chaque recalcul des réseaux (pour redessiner les câbles).
+    #[serde(skip)]
     grid_version: u64,
 }
 
@@ -476,6 +480,11 @@ impl SimWorld {
 
     pub fn conveyors(&self) -> impl Iterator<Item = (BuildingId, &Conveyor)> {
         self.conveyors.iter().map(|(id, c)| (*id, c))
+    }
+
+    /// À appeler après un chargement : recalcule ce qui n'est pas sauvegardé (réseaux).
+    pub fn after_load(&mut self) {
+        self.rebuild_grid();
     }
 
     /// Recalcule connexions et réseaux : seulement à la pose ou au retrait d'un bâtiment.

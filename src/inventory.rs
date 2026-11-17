@@ -4,9 +4,10 @@
 //! qu'il ajoute, jamais plus que la place disponible ; rien n'est dupliqué ni perdu.
 
 use crate::world::deposits::ResourceKind;
+use serde::{Deserialize, Serialize};
 
 /// Type d'objet transportable : minerais (extraits des gisements) et plaques (fondues au four).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ItemKind {
     IronOre,
     CopperOre,
@@ -78,14 +79,14 @@ impl ItemKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemStack {
     pub kind: ItemKind,
     pub count: u32,
 }
 
 /// Inventaire à cases (celui du joueur) : chaque case contient au plus une pile.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inventory {
     slots: Vec<Option<ItemStack>>,
 }
@@ -249,7 +250,7 @@ fn merge_or_swap(src: &mut Option<ItemStack>, dst: &mut Option<ItemStack>) {
 
 /// Emplacement de machine borné, qui contient un seul type d'objet à la fois.
 /// Vide, il accepte n'importe quel type ; il oublie son type dès qu'il est vidé.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineSlot {
     stack: Option<ItemStack>,
     capacity: u32,
@@ -313,7 +314,7 @@ impl MachineSlot {
 }
 
 /// Inventaire borné d'un seul type d'objet (entrée ou sortie de machine).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemBuffer {
     kind: ItemKind,
     count: u32,

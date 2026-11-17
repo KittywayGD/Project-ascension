@@ -1,22 +1,40 @@
 # Simulation
 
-> État : **M6** — horloge à pas fixe, extracteurs, four, coffre, hub, modules, réseau électrique, convoyeurs et simulation hors champ.
+> État : **V0.1** — horloge à pas fixe, extracteurs, four, coffre, hub, modules, réseau électrique, convoyeurs, simulation hors champ, arbre techno primitif et coûts de construction.
 
-## Démarrer une usine
+## Démarrer une usine (mode normal)
 
-1. Pose un **générateur** (touche 2 en mode construction) sur un terrain libre.
-2. Pose un **poteau** (4) à moins de 10 m : un câble apparaît.
-3. Pose un **extracteur** (1) sur un gisement à moins de 10 m d'un poteau, en ajoutant des poteaux pour faire la distance.
-4. Pose un **four** (3) relié au réseau, ouvre-le (E), dépose du minerai : il en fait des plaques.
-5. Pour automatiser : pose un **coffre**, puis des **convoyeurs** de la sortie de l'extracteur (bloc jaune) à l'entrée du four (bloc bleu), et de la sortie du four à l'entrée du coffre.
+Une nouvelle partie démarre avec **50 plaques de fer** : de quoi poser extracteur, four, générateur, poteau et hub.
 
-Les bâtiments se choisissent dans le **menu de construction** (B).
+1. Pose un **générateur** sur un terrain libre, puis un **poteau** à moins de 10 m : un câble apparaît.
+2. Pose un **extracteur** sur un gisement de fer, relié au réseau (ajoute des poteaux pour faire la distance).
+3. Pose un **four** relié au réseau. Prends le minerai de l'extracteur (E, « Tout prendre ») et dépose-le dans le four : il en fait des plaques.
+4. Pose un **hub** et livre-lui des plaques à la main (« Livrer tout l'inventaire ») : à 50 plaques de fer, les **convoyeurs** se débloquent.
+5. Automatise : convoyeurs de la sortie de l'extracteur (bloc jaune) à l'entrée du four (bloc bleu), puis du four au hub.
 
-## Hub de livraison et objectifs (`src/simulation/hub.rs`)
+Les bâtiments se choisissent dans le **menu de construction** (B), qui affiche leur prix et les outils encore verrouillés.
+
+## Arbre technologique et coûts (`src/simulation/tech.rs`)
+
+- Les **paliers** se débloquent dans l'ordre, avec les livraisons **cumulées** de tous les hubs depuis le début de la partie. La progression n'a pas d'état à elle : elle se déduit des livraisons (sauvegardées).
+
+| Palier | À livrer (cumulé) | Débloque |
+|---|---|---|
+| 0 « Départ » | — | extracteur, générateur, poteau, four, coffre, hub |
+| 1 « Logistique » | 50 plaques de fer | convoyeur |
+| 2 « Accélération » | 50 plaques de cuivre | module de vitesse |
+| 3 « Rendement » | 300 fer + 200 cuivre | module d'efficacité |
+| 4 « Industrie » | 1 000 plaques de fer | (rien pour l'instant) |
+
+- **Prix** (plaques prises dans l'inventaire du joueur) : extracteur 10 fer, générateur 8, four 8, coffre 4, poteau 2, hub 15 ; convoyeur 1 fer par tranche de 2 m ; module de vitesse 5 fer + 10 cuivre ; module d'efficacité 10 fer + 10 cuivre.
+- Le paiement est **tout ou rien** : s'il manque une plaque, la pose est refusée (fantôme rouge, motif dans le bandeau).
+- **Démonter rembourse** le prix et rend le contenu de la machine, y compris les convoyeurs et modules qui partent avec un bâtiment. Ce qui ne tient pas dans l'inventaire est perdu, et le bandeau le dit.
+- **Mode créatif** (choisi à la création du monde, toujours actif avec `--demo`) : tout est débloqué et gratuit ; le démontage rend seulement le contenu.
+
+## Hub de livraison (`src/simulation/hub.rs`)
 
 - Le **hub** accepte tout objet, par convoyeur (entrée à l'arrière) ou à la main (« Livrer tout l'inventaire » dans son panneau). L'objet est **consommé** : il quitte le jeu et est compté.
-- Les livraisons de tous les hubs s'additionnent et font avancer **5 objectifs successifs** : 50 plaques de fer, 50 plaques de cuivre, 300 plaques de fer, 200 plaques de cuivre, 1 000 plaques de fer. Ce qui a été livré d'avance compte dès que l'objectif devient le courant.
-- L'objectif en cours est affiché en haut à droite, et une notification apparaît quand il est atteint. Il préfigure l'arbre technologique de la V0.1.
+- Les livraisons de tous les hubs s'additionnent et font avancer les paliers. Le palier suivant et sa progression sont affichés en haut à droite, avec une notification au déblocage.
 - Le hub n'a pas besoin d'énergie. Son voyant est vert quand un convoyeur lui apporte quelque chose.
 
 ## Simulation hors champ (M6)

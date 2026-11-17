@@ -3,10 +3,12 @@
 //! Volontairement indépendante de Bevy (voir TODO §1 : simulation en Rust pur) :
 //! le temps simulé se compte en ticks entiers, jamais en secondes flottantes.
 
+use serde::{Deserialize, Serialize};
+
 /// Fréquence du tick de simulation. Valeur provisoire, à mesurer (TODO M3).
 pub const TICK_RATE_HZ: u32 = 20;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimClock {
     tick: u64,
 }

@@ -8,6 +8,12 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use super::generation::HeightField;
+use super::noise::Perlin;
+
+/// Sel du bruit de couleur du sol : purement visuel, indépendant du relief.
+const COLOR_NOISE_SALT: u64 = 0xC010_7E55;
+/// Taille des taches de couleur de l'herbe, en mètres.
+const COLOR_NOISE_SCALE_M: f64 = 38.0;
 
 /// Côté d'un chunk, en cellules de heightmap (64 m avec la résolution par défaut).
 pub const CHUNK_CELLS: usize = 64;
@@ -48,6 +54,8 @@ pub fn build_chunk_mesh(field: &HeightField, chunk: TerrainChunk) -> Mesh {
     let depth = j1 - j0 + 1;
     let origin = chunk_origin(field, chunk);
     let cell = field.config().cell_size_m;
+    // Coordonnées globales : deux chunks voisins obtiennent la même couleur à la frontière.
+    let tint = Perlin::new(field.seed().0 ^ COLOR_NOISE_SALT);
 
     let vertex_count = width * depth;
     let mut positions = Vec::with_capacity(vertex_count);
@@ -64,7 +72,11 @@ pub fn build_chunk_mesh(field: &HeightField, chunk: TerrainChunk) -> Mesh {
             normals.push(normal.to_array());
             // UV en mètres / 16 : prêt pour une texture qui se répète tous les 16 m.
             uvs.push([x / 16.0, z / 16.0]);
-            colors.push(ground_color(h, normal.y));
+            let variation = tint.sample(
+                f64::from(x) / COLOR_NOISE_SCALE_M,
+                f64::from(z) / COLOR_NOISE_SCALE_M,
+            ) as f32;
+            colors.push(ground_color(h, normal.y, variation));
         }
     }
 
@@ -98,23 +110,35 @@ fn sample_normal(field: &HeightField, i: usize, j: usize, cell: f32) -> Vec3 {
     Vec3::new(-dhdx, 1.0, -dhdz).normalize()
 }
 
-/// Couleur du sol selon l'altitude et la pente (`up` = composante verticale de la normale).
-fn ground_color(height: f32, up: f32) -> [f32; 4] {
+/// Couleur du sol selon l'altitude, la pente (`up` = composante verticale de la normale)
+/// et une variation lente dans [-1, 1] (taches d'herbe plus sèche ou plus grasse).
+///
+/// Paliers de pente : herbe jusqu'à ~25°, terre de 25 à 37°, roche au-delà de ~40°.
+/// La roche reste ainsi réservée aux vraies falaises au lieu de griser toutes les collines.
+fn ground_color(height: f32, up: f32, variation: f32) -> [f32; 4] {
     let linear = |r, g, b| Color::srgb(r, g, b).to_linear().to_vec4();
     let seabed = linear(0.50, 0.46, 0.36);
-    let sand = linear(0.80, 0.74, 0.54);
-    let grass_low = linear(0.30, 0.47, 0.20);
-    let grass_high = linear(0.45, 0.52, 0.30);
-    let rock = linear(0.46, 0.44, 0.41);
+    let sand = linear(0.84, 0.77, 0.56);
+    let grass_lush = linear(0.27, 0.46, 0.18);
+    let grass_dry = linear(0.46, 0.53, 0.25);
+    let meadow_high = linear(0.40, 0.50, 0.28);
+    let dirt = linear(0.40, 0.39, 0.25);
+    let rock = linear(0.47, 0.45, 0.42);
 
-    let grass = grass_low.lerp(grass_high, (height / 60.0).clamp(0.0, 1.0));
+    let patch = smoothstep(variation * 1.6 * 0.5 + 0.5);
+    let grass = grass_lush
+        .lerp(grass_dry, patch)
+        .lerp(meadow_high, smoothstep((height - 25.0) / 40.0) * 0.6);
     let mut color = if height < 0.0 {
         seabed.lerp(sand, smoothstep((height + 4.0) / 4.0))
     } else {
         sand.lerp(grass, smoothstep((height - 1.0) / 2.0))
     };
-    // Pentes raides (> ~30°) : roche.
-    color = color.lerp(rock, smoothstep((0.88 - up) / 0.12));
+    if height >= 0.0 {
+        color = color.lerp(dirt, smoothstep((0.92 - up) / 0.10) * 0.5);
+    }
+    // Transition courte : la roche forme des bandes nettes de falaise, pas un dégradé.
+    color = color.lerp(rock, smoothstep((0.76 - up) / 0.05));
     color.to_array()
 }
 
@@ -173,10 +197,19 @@ mod tests {
 
     #[test]
     fn steep_slopes_turn_to_rock_and_flat_land_stays_green() {
-        let flat = ground_color(20.0, 1.0);
-        let cliff = ground_color(20.0, 0.5);
+        let flat = ground_color(20.0, 1.0, 0.0);
+        let cliff = ground_color(20.0, 0.5, 0.0);
         // Herbe : vert dominant. Roche : composantes presque égales.
         assert!(flat[1] > flat[0] && flat[1] > flat[2]);
         assert!((cliff[0] - cliff[1]).abs() < 0.05);
+    }
+
+    #[test]
+    fn gentle_hills_stay_green_whatever_the_variation() {
+        // Pente de ~20° : encore de l'herbe, pas de roche grise.
+        for variation in [-1.0, 0.0, 1.0] {
+            let c = ground_color(15.0, 0.94, variation);
+            assert!(c[1] > c[0] && c[1] > c[2], "variation {variation} : {c:?}");
+        }
     }
 }

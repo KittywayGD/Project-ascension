@@ -4532,6 +4532,8 @@ name = "project-ascension"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "ron",
+ "serde",
 ]
 
 [[package]]

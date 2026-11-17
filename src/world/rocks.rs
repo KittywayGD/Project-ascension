@@ -12,13 +12,14 @@
 use std::collections::BTreeSet;
 
 use bevy::math::Vec3;
+use serde::{Deserialize, Serialize};
 
 use super::generation::{HeightField, WorldSeed};
 use super::noise::SplitMix64;
 use crate::collision::Obstacle;
 
 /// Identifiant stable d'un rocher : son rang dans l'ordre de génération.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RockId(pub u32);
 
 /// Un rocher : ellipsoïde de révolution posé (et un peu enfoncé) sur le terrain.

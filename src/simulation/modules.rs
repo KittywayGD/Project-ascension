@@ -11,8 +11,9 @@
 //! compatible, jamais sur un autre module (aucun cycle possible).
 
 use super::sim_world::{BuildingId, BuildingKind};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ModuleKind {
     Speed,
     Efficiency,
@@ -60,7 +61,7 @@ impl ModuleKind {
 }
 
 /// Un module posé : son type, sa machine hôte et son emplacement sur celle-ci.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Module {
     pub kind: ModuleKind,
     pub host: BuildingId,
@@ -68,7 +69,7 @@ pub struct Module {
 }
 
 /// Statistiques d'un noyau après application de ses modules, en pourcentages entiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineStats {
     /// Vitesse de travail (100 = nominale).
     pub speed_percent: u32,

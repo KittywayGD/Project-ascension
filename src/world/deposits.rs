@@ -9,6 +9,7 @@
 use super::generation::{HeightField, WorldSeed, square_ring};
 use super::noise::SplitMix64;
 use super::rocks::RockField;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ResourceKind {
@@ -56,7 +57,7 @@ impl Purity {
 }
 
 /// Identifiant stable d'un gisement : son rang dans l'ordre de génération.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DepositId(pub u32);
 
 #[derive(Debug, Clone, PartialEq)]

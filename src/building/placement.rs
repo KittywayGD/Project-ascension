@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use bevy::math::{Quat, Vec3};
+use serde::{Deserialize, Serialize};
 
 use crate::collision::{Obstacle, ray_aabb};
 use crate::simulation::energy::POLE_RANGE_M;
@@ -104,7 +105,7 @@ pub fn input_port(kind: BuildingKind) -> Option<Vec3> {
 }
 
 /// Un bâtiment posé dans le monde : tout ce qu'il faut pour l'afficher et le sauvegarder.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlacedBuilding {
     pub kind: BuildingKind,
     pub x: f32,
@@ -176,7 +177,7 @@ impl PlacedBuilding {
 }
 
 /// Tous les bâtiments posés, indexés par leur identifiant de simulation.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PlacedBuildings {
     buildings: BTreeMap<BuildingId, PlacedBuilding>,
 }

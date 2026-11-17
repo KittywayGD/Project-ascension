@@ -9,6 +9,8 @@ publish = false
 [dependencies]
 # Version épinglée (voir TODO §1) : ne monter de version qu'entre deux jalons.
 bevy = "0.20.1"
+ron = "0.12.3"
+serde = { version = "1.0.229", features = ["derive"] }
 
 [features]
 # Liaison dynamique de Bevy pour des recompilations rapides en développement.
